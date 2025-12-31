@@ -1,6 +1,6 @@
 module github.com/sliverarmory/sliver-crackstation
 
-go 1.19
+go 1.24.0
 
 require (
 	github.com/bishopfox/sliver v1.5.32-0.20221115013203-9aa738884a34
@@ -10,7 +10,7 @@ require (
 	github.com/gofrs/uuid v4.3.1+incompatible
 	github.com/klauspost/compress v1.15.12
 	github.com/spf13/cobra v1.6.1
-	golang.org/x/sys v0.0.0-20220928140112-f11e5e49a4ec
+	golang.org/x/sys v0.39.0
 	golang.org/x/term v0.0.0-20210927222741-03fcf44c2211
 	google.golang.org/grpc v1.42.0-dev.0.20211020220737-f00baa6c3c84
 )
