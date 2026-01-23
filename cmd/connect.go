@@ -32,6 +32,7 @@ import (
 	"github.com/sliverarmory/sliver-crackstation/pkg/crackstation"
 	"github.com/sliverarmory/sliver-crackstation/pkg/hashcat"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"golang.org/x/term"
 )
 
@@ -54,122 +55,151 @@ var connectCmd = &cobra.Command{
 	Short: "Connect to a Sliver C2 server",
 	Long:  ``,
 	Run: func(cmd *cobra.Command, args []string) {
-		disableTUI, err := cmd.Flags().GetBool(disableTUIFlagStr)
+		options, err := connectOptionsFromFlags(cmd.Flags())
 		if err != nil {
-			log.Printf("Failed to parse --%s flag %s\n", disableTUIFlagStr, err)
+			log.Printf("Failed to parse connect flags: %s", err)
 			os.Exit(1)
 		}
 
-		force, err := cmd.Flags().GetBool(forceFlagStr)
-		if err != nil {
-			log.Printf("Failed to parse --%s flag %s\n", forceFlagStr, err)
+		if err := runConnectWithOptions(options); err != nil {
+			log.Printf("Failed to run connect: %s", err)
 			os.Exit(1)
 		}
-		assets.Setup(force, true)
-
-		configPath, err := cmd.Flags().GetString(operatorConfigFlagStr)
-		if err != nil {
-			log.Printf("Failed to parse --%s flag %s\n", operatorConfigFlagStr, err)
-			os.Exit(1)
-		}
-		if configPath == "" {
-			log.Printf("Missing --%s flag\n", operatorConfigFlagStr)
-			os.Exit(1)
-		}
-		config, err := sliverClientAssets.ReadConfig(configPath)
-		if err != nil {
-			log.Printf("Failed to read config %s\n", err)
-			os.Exit(-1)
-		}
-		configs := []sliverClientAssets.ClientConfig{*config}
-
-		name, err := cmd.Flags().GetString(nameFlagStr)
-		if err != nil {
-			log.Printf("Failed to parse --%s flag %s\n", nameFlagStr, err)
-			os.Exit(1)
-		}
-		if name == "" {
-			name, err = os.Hostname()
-			if err != nil {
-				log.Printf("Failed to get hostname: %s", err)
-				name = fmt.Sprintf("%s's %s cracker", config.Operator, runtime.GOOS)
-			}
-		}
-		log.Printf("Hello my name is '%s'", name)
-
-		// initialize the hashcat
-		hashcatInstance := hashcat.NewHashcat(assets.GetHashcatDir())
-		log.Printf("[hashcat] %s", hashcatInstance.Version())
-		log.Printf("[hashcat] enumerating hashcat devices ...")
-		fmt.Printf("Enumerating hashcat devices ... ")
-		err = hashcatInstance.BackendInfo()
-		if err != nil {
-			fmt.Printf("failure!\n")
-			log.Printf("Failed to get hashcat backend info: %s", err)
-			os.Exit(-1)
-		}
-
-		metal, _ := json.Marshal(hashcatInstance.MetalBackend)
-		log.Printf("[hashcat] metal: %s", metal)
-		openCL, _ := json.Marshal(hashcatInstance.OpenCLBackend)
-		log.Printf("[hashcat] open-cl: %s", openCL)
-		cuda, _ := json.Marshal(hashcatInstance.CUDABackend)
-		log.Printf("[hashcat] cuda: %s", cuda)
-
-		if len(metal) == 0 && len(openCL) == 0 && len(cuda) == 0 {
-			fmt.Printf("no devices!\n")
-			log.Printf("No hashcat devices found")
-			os.Exit(-1)
-		}
-		fmt.Printf("done\n")
-
-		fmt.Printf("   CUDA: %d device(s)\n", len(hashcatInstance.CUDABackend))
-		fmt.Printf(" OpenCL: %d device(s)\n", len(hashcatInstance.OpenCLBackend))
-		fmt.Printf("  Metal: %d device(s)\n", len(hashcatInstance.MetalBackend))
-
-		log.Printf("Initializing crackstation ...")
-		dataDir := filepath.Join(assets.GetRootAppDir(), "data")
-
-		cracker, err := crackstation.NewCrackstation(name, dataDir, hashcatInstance)
-		if err != nil {
-			log.Printf("Failed to initialize crackstation: %s", err)
-			os.Exit(-2)
-		}
-
-		_, err = cracker.LoadBenchmarkResults()
-		if err != nil {
-			log.Printf("Could not find benchmark results, starting benchmark ...")
-			fmt.Printf("Benchmarking system, please wait ... ")
-			err = cracker.Benchmark()
-			if err != nil {
-				log.Printf("Failed to benchmark: %s", err)
-				fmt.Printf("failure!\n")
-				fmt.Printf("Failed to benchmark: %s\n", err)
-				os.Exit(-3)
-			}
-			fmt.Printf("done\n")
-		}
-
-		for _, config := range configs {
-			log.Printf("Subscribing to %s:%d", config.LHost, config.LPort)
-			cracker.AddServer(&config)
-		}
-
-		hasTTY := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
-		if disableTUI || !hasTTY {
-			enableStdoutLogging()
-			tui.StartLogOnly(cracker, os.Stdout)
-			return
-		}
-
-		tui.StartTUI(cracker)
 	},
 }
 
-func runConnectWithArgs(args []string) error {
-	connectCmd.SetArgs(args)
-	connectCmd.SetIn(os.Stdin)
-	connectCmd.SetOut(os.Stdout)
-	connectCmd.SetErr(os.Stderr)
-	return connectCmd.Execute()
+type connectOptions struct {
+	Name           string
+	OperatorConfig string
+	Force          bool
+	DisableTUI     bool
+}
+
+func connectOptionsFromFlags(flags *pflag.FlagSet) (connectOptions, error) {
+	disableTUI, err := flags.GetBool(disableTUIFlagStr)
+	if err != nil {
+		return connectOptions{}, err
+	}
+
+	force, err := flags.GetBool(forceFlagStr)
+	if err != nil {
+		return connectOptions{}, err
+	}
+
+	configPath, err := flags.GetString(operatorConfigFlagStr)
+	if err != nil {
+		return connectOptions{}, err
+	}
+
+	name, err := flags.GetString(nameFlagStr)
+	if err != nil {
+		return connectOptions{}, err
+	}
+
+	return connectOptions{
+		Name:           name,
+		OperatorConfig: configPath,
+		Force:          force,
+		DisableTUI:     disableTUI,
+	}, nil
+}
+
+func parseConnectOptions(args []string) (connectOptions, error) {
+	flags := pflag.NewFlagSet("connect", pflag.ContinueOnError)
+	flags.StringP(nameFlagStr, "n", "", "Name of the crackstation (blank = hostname)")
+	flags.StringP(operatorConfigFlagStr, "c", "", "Path to operator config file")
+	flags.Bool(forceFlagStr, false, "Force unpacking of assets")
+	flags.Bool(disableTUIFlagStr, false, "Disable the TUI and log status to stdout")
+	if err := flags.Parse(args); err != nil {
+		return connectOptions{}, err
+	}
+	return connectOptionsFromFlags(flags)
+}
+
+func runConnectWithOptions(options connectOptions) error {
+	if options.OperatorConfig == "" {
+		return fmt.Errorf("missing --%s flag", operatorConfigFlagStr)
+	}
+
+	assets.Setup(options.Force, true)
+
+	config, err := sliverClientAssets.ReadConfig(options.OperatorConfig)
+	if err != nil {
+		return fmt.Errorf("failed to read config: %w", err)
+	}
+	configs := []sliverClientAssets.ClientConfig{*config}
+
+	name := options.Name
+	if name == "" {
+		name, err = os.Hostname()
+		if err != nil {
+			log.Printf("Failed to get hostname: %s", err)
+			name = fmt.Sprintf("%s's %s cracker", config.Operator, runtime.GOOS)
+		}
+	}
+	log.Printf("Hello my name is '%s'", name)
+
+	// initialize the hashcat
+	hashcatInstance := hashcat.NewHashcat(assets.GetHashcatDir())
+	log.Printf("[hashcat] %s", hashcatInstance.Version())
+	log.Printf("[hashcat] enumerating hashcat devices ...")
+	fmt.Printf("Enumerating hashcat devices ... ")
+	err = hashcatInstance.BackendInfo()
+	if err != nil {
+		fmt.Printf("failure!\n")
+		return fmt.Errorf("failed to get hashcat backend info: %w", err)
+	}
+
+	metal, _ := json.Marshal(hashcatInstance.MetalBackend)
+	log.Printf("[hashcat] metal: %s", metal)
+	openCL, _ := json.Marshal(hashcatInstance.OpenCLBackend)
+	log.Printf("[hashcat] open-cl: %s", openCL)
+	cuda, _ := json.Marshal(hashcatInstance.CUDABackend)
+	log.Printf("[hashcat] cuda: %s", cuda)
+
+	if len(metal) == 0 && len(openCL) == 0 && len(cuda) == 0 {
+		fmt.Printf("no devices!\n")
+		return fmt.Errorf("no hashcat devices found")
+	}
+	fmt.Printf("done\n")
+
+	fmt.Printf("   CUDA: %d device(s)\n", len(hashcatInstance.CUDABackend))
+	fmt.Printf(" OpenCL: %d device(s)\n", len(hashcatInstance.OpenCLBackend))
+	fmt.Printf("  Metal: %d device(s)\n", len(hashcatInstance.MetalBackend))
+
+	log.Printf("Initializing crackstation ...")
+	dataDir := filepath.Join(assets.GetRootAppDir(), "data")
+
+	cracker, err := crackstation.NewCrackstation(name, dataDir, hashcatInstance)
+	if err != nil {
+		return fmt.Errorf("failed to initialize crackstation: %w", err)
+	}
+
+	_, err = cracker.LoadBenchmarkResults()
+	if err != nil {
+		log.Printf("Could not find benchmark results, starting benchmark ...")
+		fmt.Printf("Benchmarking system, please wait ... ")
+		err = cracker.Benchmark()
+		if err != nil {
+			log.Printf("Failed to benchmark: %s", err)
+			fmt.Printf("failure!\n")
+			return fmt.Errorf("failed to benchmark: %w", err)
+		}
+		fmt.Printf("done\n")
+	}
+
+	for _, config := range configs {
+		log.Printf("Subscribing to %s:%d", config.LHost, config.LPort)
+		cracker.AddServer(&config)
+	}
+
+	hasTTY := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+	if options.DisableTUI || !hasTTY {
+		enableStdoutLogging()
+		tui.StartLogOnly(cracker, os.Stdout)
+		return nil
+	}
+
+	tui.StartTUI(cracker)
+	return nil
 }

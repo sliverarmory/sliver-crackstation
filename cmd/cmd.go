@@ -91,8 +91,7 @@ var rootCmd = &cobra.Command{
 	Short: "GPU accelerated password cracking integration for Sliver C2",
 	Long:  ``,
 	Run: func(cmd *cobra.Command, args []string) {
-		configPath := config.DefaultPath(assets.GetRootAppDir())
-		cfg, err := config.Load(configPath)
+		cfg, configPath, err := config.LoadDefault(assets.GetRootAppDir())
 		if err != nil {
 			if os.IsNotExist(err) {
 				_ = cmd.Help()
@@ -108,7 +107,13 @@ var rootCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		if err := runConnectWithArgs(connectArgs); err != nil {
+		options, err := parseConnectOptions(connectArgs)
+		if err != nil {
+			fmt.Printf("Failed to parse connect args: %v\n", err)
+			os.Exit(1)
+		}
+
+		if err := runConnectWithOptions(options); err != nil {
 			fmt.Println(err)
 			os.Exit(1)
 		}

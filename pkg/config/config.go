@@ -22,6 +22,12 @@ func DefaultPath(appDir string) string {
 	return filepath.Join(appDir, "config.yml")
 }
 
+func LoadDefault(appDir string) (*Config, string, error) {
+	path := DefaultPath(appDir)
+	cfg, err := Load(path)
+	return cfg, path, err
+}
+
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
