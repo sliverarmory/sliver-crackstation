@@ -71,3 +71,7 @@ clean-all: clean
 clean:
 	rm -f sliver-crackstation$(ARTIFACT_SUFFIX)
 	rm -f sliver-crackstation$(ARTIFACT_SUFFIX).exe
+
+.PHONY: assets
+assets:
+	$(GO) run -mod=vendor ./util/assets

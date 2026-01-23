@@ -210,6 +210,9 @@ func (c *Crackstation) saveBenchmarkResults(benchmarkResults map[int32]uint64) e
 	if err != nil {
 		return err
 	}
+	if err := os.MkdirAll(c.dataDir, 0700); err != nil {
+		return err
+	}
 	err = os.WriteFile(filepath.Join(c.dataDir, "benchmark.json"), benchmarkData, 0600)
 	if err != nil {
 		return err
