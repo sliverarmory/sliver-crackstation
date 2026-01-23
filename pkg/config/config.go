@@ -4,15 +4,20 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
 type ConnectConfig struct {
-	OperatorConfig string   `yaml:"operatorConfig"`
-	Args           []string `yaml:"args"`
-	ForceBenchmark bool     `yaml:"forceBenchmark"`
+	OperatorConfig                   string         `yaml:"operatorConfig"`
+	Args                             []string       `yaml:"args"`
+	ForceBenchmark                   bool           `yaml:"forceBenchmark"`
+	GrpcKeepaliveTime                *time.Duration `yaml:"grpcKeepaliveTime"`
+	GrpcKeepaliveTimeout             *time.Duration `yaml:"grpcKeepaliveTimeout"`
+	GrpcKeepalivePermitWithoutStream *bool          `yaml:"grpcKeepalivePermitWithoutStream"`
 }
 
 type Config struct {
@@ -51,6 +56,15 @@ func (c *Config) ConnectArgs() ([]string, error) {
 	}
 	if c.Connect.ForceBenchmark && !hasFlag(c.Connect.Args, "--force-benchmark") {
 		args = append(args, "--force-benchmark")
+	}
+	if c.Connect.GrpcKeepaliveTime != nil && !hasFlag(c.Connect.Args, "--grpc-keepalive-time") {
+		args = append(args, "--grpc-keepalive-time", c.Connect.GrpcKeepaliveTime.String())
+	}
+	if c.Connect.GrpcKeepaliveTimeout != nil && !hasFlag(c.Connect.Args, "--grpc-keepalive-timeout") {
+		args = append(args, "--grpc-keepalive-timeout", c.Connect.GrpcKeepaliveTimeout.String())
+	}
+	if c.Connect.GrpcKeepalivePermitWithoutStream != nil && !hasFlag(c.Connect.Args, "--grpc-keepalive-permit-without-stream") {
+		args = append(args, "--grpc-keepalive-permit-without-stream", strconv.FormatBool(*c.Connect.GrpcKeepalivePermitWithoutStream))
 	}
 	args = append(args, c.Connect.Args...)
 	return args, nil

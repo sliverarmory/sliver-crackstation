@@ -42,8 +42,13 @@ var (
 			BorderLeft(false).
 			BorderRight(false).
 			BorderTop(false)
-	headerTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230"))
-	headerMetaStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	headerTitleStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230"))
+	grpcLabelStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	grpcConnectedStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
+	grpcPartialStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true)
+	grpcConnectingStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true)
+	grpcDisconnectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Bold(true)
+	grpcUnavailableStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Bold(true)
 
 	tabActiveStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("230")).
@@ -235,7 +240,7 @@ func (m crackstationModel) renderHeader() string {
 	}
 
 	title := headerTitleStyle.Render("Sliver Crackstation Monitor")
-	meta := headerMetaStyle.Render(m.viewName())
+	meta := m.renderGRPCStatus()
 	headerLine := strings.TrimSpace(strings.Join([]string{title, activity, stateBadge, meta}, "  "))
 	tabs := m.renderTabs()
 	return headerStyle.Render(strings.Join([]string{headerLine, "", tabs}, "\n"))
@@ -526,6 +531,47 @@ func (m crackstationModel) viewName() string {
 	}
 }
 
+func (m crackstationModel) grpcStatus() string {
+	if m.crack == nil || m.crack.Servers == nil {
+		return "gRPC: unavailable"
+	}
+	total, connected, connecting := countServerStates(m.crack)
+	if total == 0 {
+		return "gRPC: none"
+	}
+	if connected == total {
+		return fmt.Sprintf("gRPC: connected (%d)", connected)
+	}
+	if connected > 0 {
+		return fmt.Sprintf("gRPC: partial (%d/%d)", connected, total)
+	}
+	if connecting > 0 {
+		return fmt.Sprintf("gRPC: connecting (%d)", connecting)
+	}
+	return fmt.Sprintf("gRPC: disconnected (%d)", total)
+}
+
+func (m crackstationModel) renderGRPCStatus() string {
+	label := grpcLabelStyle.Render("gRPC:")
+	if m.crack == nil || m.crack.Servers == nil {
+		return strings.Join([]string{label, grpcUnavailableStyle.Render("unavailable")}, " ")
+	}
+	total, connected, connecting := countServerStates(m.crack)
+	if total == 0 {
+		return strings.Join([]string{label, grpcUnavailableStyle.Render("none")}, " ")
+	}
+	if connected == total {
+		return strings.Join([]string{label, grpcConnectedStyle.Render(fmt.Sprintf("connected (%d)", connected))}, " ")
+	}
+	if connected > 0 {
+		return strings.Join([]string{label, grpcPartialStyle.Render(fmt.Sprintf("partial (%d/%d)", connected, total))}, " ")
+	}
+	if connecting > 0 {
+		return strings.Join([]string{label, grpcConnectingStyle.Render(fmt.Sprintf("connecting (%d)", connecting))}, " ")
+	}
+	return strings.Join([]string{label, grpcDisconnectedStyle.Render(fmt.Sprintf("disconnected (%d)", total))}, " ")
+}
+
 func newQuitConfirmForm(value *bool) *huh.Form {
 	return huh.NewForm(
 		huh.NewGroup(
@@ -548,6 +594,30 @@ func countServers(crack *crackstation.Crackstation) int {
 		return true
 	})
 	return count
+}
+
+func countServerStates(crack *crackstation.Crackstation) (int, int, int) {
+	if crack == nil || crack.Servers == nil {
+		return 0, 0, 0
+	}
+	total := 0
+	connected := 0
+	connecting := 0
+	crack.Servers.Range(func(_, value interface{}) bool {
+		total++
+		server, ok := value.(*crackstation.SliverServer)
+		if !ok || server == nil {
+			return true
+		}
+		switch server.State {
+		case crackstation.CONNECTED:
+			connected++
+		case crackstation.CONNECTING:
+			connecting++
+		}
+		return true
+	})
+	return total, connected, connecting
 }
 
 func waitForStatus(ch chan *clientpb.CrackstationStatus) tea.Cmd {

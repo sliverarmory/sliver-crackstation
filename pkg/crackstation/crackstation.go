@@ -40,6 +40,7 @@ import (
 	"github.com/gofrs/uuid"
 	"github.com/sliverarmory/sliver-crackstation/pkg/hashcat"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 )
 
 var HostUUID string
@@ -341,23 +342,27 @@ func (s *SliverServer) Connect() {
 		return
 	}
 	s.State = CONNECTED
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	// Feed events into crackstation event channel
-	events, err := s.Events()
+	events, err := s.Events(ctx)
 	if err != nil {
 		log.Printf("Error establishing events channel: %v", err)
 		return
 	}
+
+	go s.watchConn(ctx, cancel)
 
 	for event := range events {
 		s.Crackstation.Events <- &ServerEvent{Server: s, Event: event}
 	}
 }
 
-func (s *SliverServer) Events() (<-chan *clientpb.Event, error) {
+func (s *SliverServer) Events(ctx context.Context) (<-chan *clientpb.Event, error) {
 	crackstation := s.Crackstation.ToProtobuf()
 	crackstation.OperatorName = s.Config.Operator // Insert server config specific values
-	eventStream, err := s.rpc.CrackstationRegister(context.Background(), crackstation)
+	eventStream, err := s.rpc.CrackstationRegister(ctx, crackstation)
 	if err != nil {
 		return nil, err
 	}
@@ -380,6 +385,29 @@ func (s *SliverServer) Events() (<-chan *clientpb.Event, error) {
 	return events, nil
 }
 
+func (s *SliverServer) watchConn(ctx context.Context, cancel context.CancelFunc) {
+	if s.ln == nil {
+		return
+	}
+	for {
+		state := s.ln.GetState()
+		switch state {
+		case connectivity.Ready:
+			s.State = CONNECTED
+		case connectivity.Connecting, connectivity.Idle:
+			s.State = CONNECTING
+		case connectivity.TransientFailure, connectivity.Shutdown:
+			s.State = DISCONNECTED
+			cancel()
+			_ = s.ln.Close()
+			return
+		}
+		if !s.ln.WaitForStateChange(ctx, state) {
+			return
+		}
+	}
+}
+
 func (s *SliverServer) Close() error {
 	return s.ln.Close()
 }
@@ -399,7 +427,12 @@ func (s *SliverServer) saveTask(task *clientpb.CrackTask) error {
 }
 
 func (s *SliverServer) uploadBenchmarkResult(task *clientpb.CrackTask, benchmark map[int32]uint64) error {
+	name := ""
+	if s.Crackstation != nil {
+		name = s.Crackstation.Name
+	}
 	_, err := s.rpc.CrackstationBenchmark(context.Background(), &clientpb.CrackBenchmark{
+		Name:       name,
 		HostUUID:   HostUUID,
 		Benchmarks: benchmark,
 	})

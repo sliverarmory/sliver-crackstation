@@ -25,8 +25,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	sliverClientAssets "github.com/bishopfox/sliver/client/assets"
+	"github.com/bishopfox/sliver/client/transport"
 	"github.com/sliverarmory/sliver-crackstation/assets"
 	"github.com/sliverarmory/sliver-crackstation/cmd/tui"
 	"github.com/sliverarmory/sliver-crackstation/pkg/crackstation"
@@ -34,13 +36,17 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"golang.org/x/term"
+	"google.golang.org/grpc/keepalive"
 )
 
 const (
-	nameFlagStr           = "name"
-	operatorConfigFlagStr = "config"
-	disableTUIFlagStr     = "disable-tui"
-	forceBenchmarkFlagStr = "force-benchmark"
+	nameFlagStr                             = "name"
+	operatorConfigFlagStr                   = "config"
+	disableTUIFlagStr                       = "disable-tui"
+	forceBenchmarkFlagStr                   = "force-benchmark"
+	grpcKeepaliveTimeFlagStr                = "grpc-keepalive-time"
+	grpcKeepaliveTimeoutFlagStr             = "grpc-keepalive-timeout"
+	grpcKeepalivePermitWithoutStreamFlagStr = "grpc-keepalive-permit-without-stream"
 )
 
 func initConnectCmd() *cobra.Command {
@@ -49,6 +55,9 @@ func initConnectCmd() *cobra.Command {
 	connectCmd.Flags().Bool(forceFlagStr, false, "Force unpacking of assets")
 	connectCmd.Flags().Bool(disableTUIFlagStr, false, "Disable the TUI and log status to stdout")
 	connectCmd.Flags().Bool(forceBenchmarkFlagStr, false, "Always run hashcat benchmarks before starting")
+	connectCmd.Flags().Duration(grpcKeepaliveTimeFlagStr, 30*time.Second, "gRPC keepalive ping interval")
+	connectCmd.Flags().Duration(grpcKeepaliveTimeoutFlagStr, 10*time.Second, "gRPC keepalive ping timeout")
+	connectCmd.Flags().Bool(grpcKeepalivePermitWithoutStreamFlagStr, true, "Send gRPC keepalive pings when idle")
 	return connectCmd
 }
 
@@ -71,11 +80,14 @@ var connectCmd = &cobra.Command{
 }
 
 type connectOptions struct {
-	Name           string
-	OperatorConfig string
-	Force          bool
-	DisableTUI     bool
-	ForceBenchmark bool
+	Name                         string
+	OperatorConfig               string
+	Force                        bool
+	DisableTUI                   bool
+	ForceBenchmark               bool
+	KeepaliveTime                time.Duration
+	KeepaliveTimeout             time.Duration
+	KeepalivePermitWithoutStream bool
 }
 
 func connectOptionsFromFlags(flags *pflag.FlagSet) (connectOptions, error) {
@@ -104,12 +116,30 @@ func connectOptionsFromFlags(flags *pflag.FlagSet) (connectOptions, error) {
 		return connectOptions{}, err
 	}
 
+	keepaliveTime, err := flags.GetDuration(grpcKeepaliveTimeFlagStr)
+	if err != nil {
+		return connectOptions{}, err
+	}
+
+	keepaliveTimeout, err := flags.GetDuration(grpcKeepaliveTimeoutFlagStr)
+	if err != nil {
+		return connectOptions{}, err
+	}
+
+	keepalivePermitWithoutStream, err := flags.GetBool(grpcKeepalivePermitWithoutStreamFlagStr)
+	if err != nil {
+		return connectOptions{}, err
+	}
+
 	return connectOptions{
-		Name:           name,
-		OperatorConfig: configPath,
-		Force:          force,
-		DisableTUI:     disableTUI,
-		ForceBenchmark: forceBenchmark,
+		Name:                         name,
+		OperatorConfig:               configPath,
+		Force:                        force,
+		DisableTUI:                   disableTUI,
+		ForceBenchmark:               forceBenchmark,
+		KeepaliveTime:                keepaliveTime,
+		KeepaliveTimeout:             keepaliveTimeout,
+		KeepalivePermitWithoutStream: keepalivePermitWithoutStream,
 	}, nil
 }
 
@@ -120,6 +150,9 @@ func parseConnectOptions(args []string) (connectOptions, error) {
 	flags.Bool(forceFlagStr, false, "Force unpacking of assets")
 	flags.Bool(disableTUIFlagStr, false, "Disable the TUI and log status to stdout")
 	flags.Bool(forceBenchmarkFlagStr, false, "Always run hashcat benchmarks before starting")
+	flags.Duration(grpcKeepaliveTimeFlagStr, 30*time.Second, "gRPC keepalive ping interval")
+	flags.Duration(grpcKeepaliveTimeoutFlagStr, 10*time.Second, "gRPC keepalive ping timeout")
+	flags.Bool(grpcKeepalivePermitWithoutStreamFlagStr, true, "Send gRPC keepalive pings when idle")
 	if err := flags.Parse(args); err != nil {
 		return connectOptions{}, err
 	}
@@ -132,6 +165,11 @@ func runConnectWithOptions(options connectOptions) error {
 	}
 
 	assets.Setup(options.Force, true)
+	transport.SetKeepaliveParams(keepalive.ClientParameters{
+		Time:                options.KeepaliveTime,
+		Timeout:             options.KeepaliveTimeout,
+		PermitWithoutStream: options.KeepalivePermitWithoutStream,
+	})
 
 	config, err := sliverClientAssets.ReadConfig(options.OperatorConfig)
 	if err != nil {
