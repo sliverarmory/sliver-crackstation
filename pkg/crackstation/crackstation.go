@@ -220,6 +220,15 @@ func (c *Crackstation) saveBenchmarkResults(benchmarkResults map[int32]uint64) e
 	return nil
 }
 
+func (c *Crackstation) EnsureBenchmark(force bool) error {
+	if !force {
+		if _, err := c.LoadBenchmarkResults(); err == nil {
+			return nil
+		}
+	}
+	return c.Benchmark()
+}
+
 // LoadBenchmarkResults - Load benchmark results from disk
 func (c *Crackstation) LoadBenchmarkResults() (map[int32]uint64, error) {
 	if _, err := os.Stat(filepath.Join(c.dataDir, "benchmark.json")); os.IsNotExist(err) {

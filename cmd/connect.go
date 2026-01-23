@@ -40,6 +40,7 @@ const (
 	nameFlagStr           = "name"
 	operatorConfigFlagStr = "config"
 	disableTUIFlagStr     = "disable-tui"
+	forceBenchmarkFlagStr = "force-benchmark"
 )
 
 func initConnectCmd() *cobra.Command {
@@ -47,6 +48,7 @@ func initConnectCmd() *cobra.Command {
 	connectCmd.Flags().StringP(operatorConfigFlagStr, "c", "", "Path to operator config file")
 	connectCmd.Flags().Bool(forceFlagStr, false, "Force unpacking of assets")
 	connectCmd.Flags().Bool(disableTUIFlagStr, false, "Disable the TUI and log status to stdout")
+	connectCmd.Flags().Bool(forceBenchmarkFlagStr, false, "Always run hashcat benchmarks before starting")
 	return connectCmd
 }
 
@@ -73,6 +75,7 @@ type connectOptions struct {
 	OperatorConfig string
 	Force          bool
 	DisableTUI     bool
+	ForceBenchmark bool
 }
 
 func connectOptionsFromFlags(flags *pflag.FlagSet) (connectOptions, error) {
@@ -96,11 +99,17 @@ func connectOptionsFromFlags(flags *pflag.FlagSet) (connectOptions, error) {
 		return connectOptions{}, err
 	}
 
+	forceBenchmark, err := flags.GetBool(forceBenchmarkFlagStr)
+	if err != nil {
+		return connectOptions{}, err
+	}
+
 	return connectOptions{
 		Name:           name,
 		OperatorConfig: configPath,
 		Force:          force,
 		DisableTUI:     disableTUI,
+		ForceBenchmark: forceBenchmark,
 	}, nil
 }
 
@@ -110,6 +119,7 @@ func parseConnectOptions(args []string) (connectOptions, error) {
 	flags.StringP(operatorConfigFlagStr, "c", "", "Path to operator config file")
 	flags.Bool(forceFlagStr, false, "Force unpacking of assets")
 	flags.Bool(disableTUIFlagStr, false, "Disable the TUI and log status to stdout")
+	flags.Bool(forceBenchmarkFlagStr, false, "Always run hashcat benchmarks before starting")
 	if err := flags.Parse(args); err != nil {
 		return connectOptions{}, err
 	}
@@ -175,17 +185,8 @@ func runConnectWithOptions(options connectOptions) error {
 		return fmt.Errorf("failed to initialize crackstation: %w", err)
 	}
 
-	_, err = cracker.LoadBenchmarkResults()
-	if err != nil {
-		log.Printf("Could not find benchmark results, starting benchmark ...")
-		fmt.Printf("Benchmarking system, please wait ... ")
-		err = cracker.Benchmark()
-		if err != nil {
-			log.Printf("Failed to benchmark: %s", err)
-			fmt.Printf("failure!\n")
-			return fmt.Errorf("failed to benchmark: %w", err)
-		}
-		fmt.Printf("done\n")
+	if err := ensureBenchmarks(cracker, options.ForceBenchmark); err != nil {
+		return err
 	}
 
 	for _, config := range configs {
@@ -201,5 +202,23 @@ func runConnectWithOptions(options connectOptions) error {
 	}
 
 	tui.StartTUI(cracker)
+	return nil
+}
+
+func ensureBenchmarks(cracker *crackstation.Crackstation, force bool) error {
+	log.Printf("Checking benchmark cache ...")
+	if !force {
+		if _, err := cracker.LoadBenchmarkResults(); err == nil {
+			return nil
+		}
+	}
+
+	log.Printf("Running hashcat benchmark ...")
+	fmt.Printf("Benchmarking system, please wait ... ")
+	if err := cracker.EnsureBenchmark(true); err != nil {
+		fmt.Printf("failure!\n")
+		return fmt.Errorf("failed to benchmark: %w", err)
+	}
+	fmt.Printf("done\n")
 	return nil
 }

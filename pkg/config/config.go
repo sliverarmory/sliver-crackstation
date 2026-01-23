@@ -12,6 +12,7 @@ import (
 type ConnectConfig struct {
 	OperatorConfig string   `yaml:"operatorConfig"`
 	Args           []string `yaml:"args"`
+	ForceBenchmark bool     `yaml:"forceBenchmark"`
 }
 
 type Config struct {
@@ -48,6 +49,9 @@ func (c *Config) ConnectArgs() ([]string, error) {
 	if c.Connect.OperatorConfig != "" && !hasConfigFlag(c.Connect.Args) {
 		args = append(args, "--config", c.Connect.OperatorConfig)
 	}
+	if c.Connect.ForceBenchmark && !hasFlag(c.Connect.Args, "--force-benchmark") {
+		args = append(args, "--force-benchmark")
+	}
 	args = append(args, c.Connect.Args...)
 	return args, nil
 }
@@ -58,6 +62,18 @@ func hasConfigFlag(args []string) bool {
 			return true
 		}
 		if strings.HasPrefix(args[i], "--config=") {
+			return true
+		}
+	}
+	return false
+}
+
+func hasFlag(args []string, flag string) bool {
+	for i := 0; i < len(args); i++ {
+		if args[i] == flag {
+			return true
+		}
+		if strings.HasPrefix(args[i], flag+"=") {
 			return true
 		}
 	}

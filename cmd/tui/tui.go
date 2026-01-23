@@ -22,6 +22,7 @@ const (
 	viewSummary viewMode = iota
 	viewHost
 	viewDevices
+	viewBenchmarks
 )
 
 var (
@@ -70,6 +71,10 @@ type crackstationModel struct {
 	confirming  bool
 	confirmForm *huh.Form
 	confirmQuit *bool
+	benchmarks  map[int32]uint64
+	benchErr    error
+	devicePage  int
+	benchPage   int
 	width       int
 	height      int
 }
@@ -104,6 +109,11 @@ func newModel(crack *crackstation.Crackstation, statusSub chan *clientpb.Crackst
 	spin.Spinner = spinner.Line
 	spin.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("69"))
 	confirmQuit := false
+	var benchmarks map[int32]uint64
+	var benchErr error
+	if crack != nil {
+		benchmarks, benchErr = crack.LoadBenchmarkResults()
+	}
 	return crackstationModel{
 		crack:       crack,
 		status:      crack.Status(),
@@ -112,6 +122,8 @@ func newModel(crack *crackstation.Crackstation, statusSub chan *clientpb.Crackst
 		spinner:     spin,
 		view:        viewSummary,
 		confirmQuit: &confirmQuit,
+		benchmarks:  benchmarks,
+		benchErr:    benchErr,
 	}
 }
 
@@ -154,7 +166,33 @@ func (m crackstationModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.confirmForm = newQuitConfirmForm(m.confirmQuit)
 			return m, m.confirmForm.Init()
 		case "tab":
-			m.view = (m.view + 1) % 3
+			m.view = (m.view + 1) % 4
+		case "left":
+			if m.view == viewDevices {
+				pages := m.devicePageCount()
+				if pages > 0 {
+					m.devicePage = (m.devicePage - 1 + pages) % pages
+				}
+			}
+			if m.view == viewBenchmarks {
+				pages := m.benchPageCount()
+				if pages > 0 {
+					m.benchPage = (m.benchPage - 1 + pages) % pages
+				}
+			}
+		case "right":
+			if m.view == viewDevices {
+				pages := m.devicePageCount()
+				if pages > 0 {
+					m.devicePage = (m.devicePage + 1) % pages
+				}
+			}
+			if m.view == viewBenchmarks {
+				pages := m.benchPageCount()
+				if pages > 0 {
+					m.benchPage = (m.benchPage + 1) % pages
+				}
+			}
 		}
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -181,7 +219,7 @@ func (m crackstationModel) View() string {
 
 	header := m.renderHeader()
 	body := m.renderBody()
-	footer := helpStyle.Render(fmt.Sprintf("q: quit  tab: next view  view: %s", m.viewName()))
+	footer := helpStyle.Render(m.footerText())
 	return strings.Join([]string{header, body, footer}, "\n\n")
 }
 
@@ -203,6 +241,56 @@ func (m crackstationModel) renderHeader() string {
 	return headerStyle.Render(strings.Join([]string{headerLine, "", tabs}, "\n"))
 }
 
+func (m crackstationModel) footerText() string {
+	hint := ""
+	if m.view == viewDevices || m.view == viewBenchmarks {
+		hint = "  \u2190/\u2192: page"
+	}
+	return fmt.Sprintf("q: quit  tab: next view  view: %s%s", m.viewName(), hint)
+}
+
+func (m crackstationModel) devicePageCount() int {
+	if m.crack == nil {
+		return 0
+	}
+	sections := deviceSections(m.crack.ToProtobuf())
+	if len(sections) == 0 {
+		return 0
+	}
+	return len(sections)
+}
+
+func (m crackstationModel) benchPageCount() int {
+	if m.benchErr != nil || len(m.benchmarks) == 0 {
+		return 0
+	}
+	pageSize := m.benchPageSize(len(m.benchmarks))
+	if pageSize <= 0 {
+		return 0
+	}
+	return (len(m.benchmarks) + pageSize - 1) / pageSize
+}
+
+func (m crackstationModel) benchPageSize(total int) int {
+	if total <= 0 {
+		return 0
+	}
+	pageSize := total
+	if m.height > 0 {
+		usable := m.height - 12
+		if usable < 5 {
+			usable = 5
+		}
+		if pageSize > usable {
+			pageSize = usable
+		}
+	}
+	if pageSize < 1 {
+		return 1
+	}
+	return pageSize
+}
+
 func (m crackstationModel) renderTabs() string {
 	tabs := []struct {
 		label string
@@ -211,6 +299,7 @@ func (m crackstationModel) renderTabs() string {
 		{label: "Summary", view: viewSummary},
 		{label: "Host", view: viewHost},
 		{label: "Devices", view: viewDevices},
+		{label: "Benchmarks", view: viewBenchmarks},
 	}
 
 	parts := make([]string, 0, len(tabs))
@@ -231,6 +320,10 @@ func (m crackstationModel) renderBody() string {
 	}
 	if m.view == viewHost {
 		lines := m.renderHostLines()
+		return boxStyle.Width(m.contentWidth()).Render(strings.Join(lines, "\n"))
+	}
+	if m.view == viewBenchmarks {
+		lines := m.renderBenchmarkLines()
 		return boxStyle.Width(m.contentWidth()).Render(strings.Join(lines, "\n"))
 	}
 
@@ -268,16 +361,36 @@ func (m crackstationModel) renderDeviceLines() []string {
 	info := m.crack.ToProtobuf()
 	lines := []string{}
 
-	totalDevices := len(info.GetCUDA()) + len(info.GetOpenCL()) + len(info.GetMetal())
-	if totalDevices == 0 {
+	sections := deviceSections(info)
+	if len(sections) == 0 {
 		lines = append(lines, "", formatLine("Devices", "none detected"))
 		return lines
 	}
 
+	page := m.devicePage
+	if page < 0 {
+		page = 0
+	}
+	if page >= len(sections) {
+		page = len(sections) - 1
+	}
+
+	section := sections[page]
+	lines = append(lines, formatLine("Page", fmt.Sprintf("%d/%d", page+1, len(sections))))
 	lines = append(lines, "")
-	lines = append(lines, renderCUDADevices(info.GetCUDA())...)
-	lines = append(lines, renderOpenCLDevices(info.GetOpenCL())...)
-	lines = append(lines, renderMetalDevices(info.GetMetal())...)
+	switch section.kind {
+	case deviceCUDA:
+		lines = append(lines, renderCUDADevices(info.GetCUDA())...)
+	case deviceMetal:
+		lines = append(lines, renderMetalDevices(info.GetMetal())...)
+	case deviceOpenCL:
+		lines = append(lines, renderOpenCLDevices(info.GetOpenCL())...)
+	}
+
+	if len(lines) == 0 {
+		lines = append(lines, formatLine(section.label, "none detected"))
+	}
+
 	return lines
 }
 
@@ -302,6 +415,55 @@ func (m crackstationModel) renderHostLines() []string {
 			formatLine("Cracking", crackSummary(m.status, time.Now())),
 			formatLine("Syncing", syncSummary(m.status)),
 		)
+	}
+
+	return lines
+}
+
+func (m crackstationModel) renderBenchmarkLines() []string {
+	if m.benchErr != nil {
+		return []string{
+			formatLine("Benchmarks", "unavailable"),
+			formatLine("Error", m.benchErr.Error()),
+		}
+	}
+	if len(m.benchmarks) == 0 {
+		return []string{formatLine("Benchmarks", "no data")}
+	}
+
+	keys := make([]int, 0, len(m.benchmarks))
+	for key := range m.benchmarks {
+		keys = append(keys, int(key))
+	}
+	sort.Ints(keys)
+
+	pageSize := m.benchPageSize(len(keys))
+
+	totalPages := m.benchPageCount()
+	page := m.benchPage
+	if page < 0 {
+		page = 0
+	}
+	if page >= totalPages {
+		page = totalPages - 1
+	}
+
+	lines := []string{
+		formatLine("Benchmarks", fmt.Sprintf("%d modes", len(keys))),
+		formatLine("Page", fmt.Sprintf("%d/%d", page+1, totalPages)),
+		"",
+	}
+
+	start := page * pageSize
+	end := start + pageSize
+	if end > len(keys) {
+		end = len(keys)
+	}
+
+	for _, key := range keys[start:end] {
+		hashMode := int32(key)
+		label := fmt.Sprintf("%s (%d)", hashTypeLabel(hashMode), hashMode)
+		lines = append(lines, formatLine(label, humanizeHashRate(m.benchmarks[hashMode])))
 	}
 
 	return lines
@@ -357,6 +519,8 @@ func (m crackstationModel) viewName() string {
 		return "host"
 	case viewDevices:
 		return "devices"
+	case viewBenchmarks:
+		return "benchmarks"
 	default:
 		return "unknown"
 	}
@@ -450,6 +614,67 @@ func emptyFallback(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func hashTypeLabel(hashMode int32) string {
+	if name, ok := clientpb.HashType_name[hashMode]; ok {
+		return strings.ReplaceAll(name, "_", " ")
+	}
+	return fmt.Sprintf("Hash Mode %d", hashMode)
+}
+
+func humanizeHashRate(rate uint64) string {
+	const unit = 1000
+	if rate < unit {
+		return fmt.Sprintf("%d H/s", rate)
+	}
+	value := float64(rate)
+	exp := 0
+	for value >= unit && exp < 5 {
+		value /= unit
+		exp++
+	}
+	suffixes := []string{"kH/s", "MH/s", "GH/s", "TH/s", "PH/s"}
+	if exp == 0 {
+		return fmt.Sprintf("%d H/s", rate)
+	}
+	if exp > len(suffixes) {
+		exp = len(suffixes)
+	}
+	return fmt.Sprintf("%.2f %s", value, suffixes[exp-1])
+}
+
+type deviceSectionKind int
+
+const (
+	deviceCUDA deviceSectionKind = iota
+	deviceMetal
+	deviceOpenCL
+)
+
+type deviceSection struct {
+	label string
+	count int
+	kind  deviceSectionKind
+}
+
+func deviceSections(info *clientpb.Crackstation) []deviceSection {
+	sections := []deviceSection{
+		{label: "CUDA", count: len(info.GetCUDA()), kind: deviceCUDA},
+		{label: "Metal", count: len(info.GetMetal()), kind: deviceMetal},
+		{label: "OpenCL", count: len(info.GetOpenCL()), kind: deviceOpenCL},
+	}
+
+	primary := []deviceSection{sections[0], sections[1]}
+	sort.SliceStable(primary, func(i, j int) bool {
+		if primary[i].count == primary[j].count {
+			return primary[i].label < primary[j].label
+		}
+		return primary[i].count > primary[j].count
+	})
+
+	ordered := []deviceSection{primary[0], primary[1], sections[2]}
+	return ordered
 }
 
 func renderCUDADevices(devices []*clientpb.CUDABackendInfo) []string {
