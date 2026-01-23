@@ -47,7 +47,7 @@ var (
 	grpcConnectedStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
 	grpcPartialStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true)
 	grpcConnectingStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true)
-	grpcDisconnectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Bold(true)
+	grpcDisconnectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
 	grpcUnavailableStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Bold(true)
 
 	tabActiveStyle = lipgloss.NewStyle().

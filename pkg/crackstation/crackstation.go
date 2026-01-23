@@ -106,7 +106,10 @@ func (c *Crackstation) roundRobinConnect(interval time.Duration) {
 		case <-time.After(interval):
 			c.Servers.Range(func(_, value interface{}) bool {
 				server := value.(*SliverServer)
-				go server.Connect()
+				server.refreshState()
+				if server.State != CONNECTED {
+					go server.Connect()
+				}
 				return true
 			})
 		}
@@ -383,6 +386,21 @@ func (s *SliverServer) Events(ctx context.Context) (<-chan *clientpb.Event, erro
 		}
 	}()
 	return events, nil
+}
+
+func (s *SliverServer) refreshState() {
+	if s.State != CONNECTED || s.ln == nil {
+		return
+	}
+	switch s.ln.GetState() {
+	case connectivity.Ready:
+		s.State = CONNECTED
+	case connectivity.Connecting, connectivity.Idle:
+		s.State = CONNECTING
+	case connectivity.TransientFailure, connectivity.Shutdown:
+		s.State = DISCONNECTED
+		_ = s.ln.Close()
+	}
 }
 
 func (s *SliverServer) watchConn(ctx context.Context, cancel context.CancelFunc) {
