@@ -83,8 +83,8 @@ type Crackstation struct {
 	hashcat *hashcat.Hashcat
 	dataDir string
 
-	CrackStatus *clientpb.CrackStatus
-	crackLock   *sync.Mutex
+	currentCrackJobID string
+	crackLock         *sync.Mutex
 
 	SyncStatus *clientpb.CrackSyncStatus
 	syncStart  time.Time
@@ -135,11 +135,11 @@ func (c *Crackstation) Status() *clientpb.CrackstationStatus {
 	acquiredLock := c.crackLock.TryLock()
 	if acquiredLock {
 		c.crackLock.Unlock()
-		status.State = clientpb.States_WAITING
-		status.Cracking = nil
+		status.State = clientpb.States_IDLE
+		status.CurrentCrackJobID = ""
 	} else {
 		status.State = clientpb.States_CRACKING
-		status.Cracking = c.CrackStatus
+		status.CurrentCrackJobID = c.currentCrackJobID
 	}
 
 	// Sync status
@@ -253,7 +253,8 @@ func (c *Crackstation) handleEvent(server *SliverServer, event *clientpb.Event) 
 			return
 		}
 		log.Printf("Benchmarking crackstation ...")
-		task.Status = "BENCHMARKING"
+		c.currentCrackJobID = task.ID
+		defer func() { c.currentCrackJobID = "" }()
 		task.StartedAt = time.Now().Unix()
 		server.saveTask(task)
 
@@ -276,9 +277,6 @@ func (c *Crackstation) handleEvent(server *SliverServer, event *clientpb.Event) 
 		}
 		if err != nil {
 			task.Err = err.Error()
-			task.Status = "FAILED"
-		} else {
-			task.Status = "COMPLETED"
 		}
 		task.CompletedAt = time.Now().Unix()
 		err = server.saveTask(task)

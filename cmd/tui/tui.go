@@ -248,12 +248,13 @@ func formatStatusLine(status *clientpb.CrackstationStatus, now time.Time) string
 }
 
 func crackSummary(status *clientpb.CrackstationStatus, now time.Time) string {
-	if status == nil || status.GetCracking() == nil || status.GetState() != clientpb.States_CRACKING {
+	if status == nil || status.GetState() != clientpb.States_CRACKING {
 		return "idle"
 	}
-	crack := status.GetCracking()
-	startedAt := time.Unix(crack.GetStartedAt(), 0)
-	return fmt.Sprintf("%s for %s", crack.GetID(), humanizeDuration(now.Sub(startedAt)))
+	if status.GetCurrentCrackJobID() == "" {
+		return "active"
+	}
+	return status.GetCurrentCrackJobID()
 }
 
 func syncSummary(status *clientpb.CrackstationStatus) string {
@@ -283,7 +284,7 @@ func formatLine(label, value string) string {
 
 func stateBadge(state string) string {
 	switch state {
-	case clientpb.States_WAITING.String():
+	case clientpb.States_INITIALIZING.String():
 		return stateStyleWaiting.Render(state)
 	case clientpb.States_CRACKING.String():
 		return stateStyleActive.Render(state)

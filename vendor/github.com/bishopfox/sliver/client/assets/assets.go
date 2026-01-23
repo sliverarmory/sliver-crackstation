@@ -20,7 +20,6 @@ package assets
 
 import (
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/user"
@@ -50,9 +49,45 @@ func GetRootAppDir() string {
 	return dir
 }
 
+// GetClientLogsDir - Get the Sliver client logs dir ~/.sliver-client/logs/
+func GetClientLogsDir() string {
+	logsDir := filepath.Join(GetRootAppDir(), "logs")
+	if _, err := os.Stat(logsDir); os.IsNotExist(err) {
+		err = os.MkdirAll(logsDir, 0700)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+	return logsDir
+}
+
+// GetConsoleLogsDir - Get the Sliver client console logs dir ~/.sliver-client/logs/console/
+func GetConsoleLogsDir() string {
+	consoleLogsDir := filepath.Join(GetClientLogsDir(), "console")
+	if _, err := os.Stat(consoleLogsDir); os.IsNotExist(err) {
+		err = os.MkdirAll(consoleLogsDir, 0700)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+	return consoleLogsDir
+}
+
+// GetMCPLogsDir - Get the Sliver client MCP logs dir ~/.sliver-client/logs/mcp/
+func GetMCPLogsDir() string {
+	mcpLogsDir := filepath.Join(GetClientLogsDir(), "mcp")
+	if _, err := os.Stat(mcpLogsDir); os.IsNotExist(err) {
+		err = os.MkdirAll(mcpLogsDir, 0700)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+	return mcpLogsDir
+}
+
 func assetVersion() string {
 	appDir := GetRootAppDir()
-	data, err := ioutil.ReadFile(filepath.Join(appDir, versionFileName))
+	data, err := os.ReadFile(filepath.Join(appDir, versionFileName))
 	if err != nil {
 		return ""
 	}
@@ -73,7 +108,7 @@ func Setup(force bool, echo bool) {
 	if force || localVer == "" || localVer != ver.GitCommit {
 		if echo {
 			fmt.Printf(`
-Sliver  Copyright (C) 2022  Bishop Fox
+Sliver  Copyright (C) 2025  Bishop Fox
 This program comes with ABSOLUTELY NO WARRANTY; for details type 'licenses'.
 This is free software, and you are welcome to redistribute it
 under certain conditions; type 'licenses' for details.`)
