@@ -20,6 +20,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -63,14 +64,25 @@ func init() {
 	rootCmd.AddCommand(versionCmd)
 }
 
+var logFile *os.File
+
 func initConsoleLogging(appDir string) *os.File {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	logFile, err := os.OpenFile(filepath.Join(appDir, "crackstation.log"), os.O_RDWR|os.O_CREATE|os.O_APPEND, 0600)
+	openedFile, err := os.OpenFile(filepath.Join(appDir, "crackstation.log"), os.O_RDWR|os.O_CREATE|os.O_APPEND, 0600)
 	if err != nil {
 		log.Fatalf("Error opening file: %v", err)
 	}
-	log.SetOutput(logFile)
-	return logFile
+	log.SetOutput(openedFile)
+	logFile = openedFile
+	return openedFile
+}
+
+func enableStdoutLogging() {
+	if logFile == nil {
+		log.SetOutput(os.Stdout)
+		return
+	}
+	log.SetOutput(io.MultiWriter(logFile, os.Stdout))
 }
 
 var rootCmd = &cobra.Command{

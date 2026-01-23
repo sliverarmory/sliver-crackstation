@@ -32,18 +32,20 @@ import (
 	"github.com/sliverarmory/sliver-crackstation/pkg/crackstation"
 	"github.com/sliverarmory/sliver-crackstation/pkg/hashcat"
 	"github.com/spf13/cobra"
-	"golang.org/x/sys/unix"
+	"golang.org/x/term"
 )
 
 const (
 	nameFlagStr           = "name"
 	operatorConfigFlagStr = "config"
+	disableTUIFlagStr     = "disable-tui"
 )
 
 func initConnectCmd() *cobra.Command {
 	connectCmd.Flags().StringP(nameFlagStr, "n", "", "Name of the crackstation (blank = hostname)")
 	connectCmd.Flags().StringP(operatorConfigFlagStr, "c", "", "Path to operator config file")
 	connectCmd.Flags().Bool(forceFlagStr, false, "Force unpacking of assets")
+	connectCmd.Flags().Bool(disableTUIFlagStr, false, "Disable the TUI and log status to stdout")
 	return connectCmd
 }
 
@@ -52,6 +54,12 @@ var connectCmd = &cobra.Command{
 	Short: "Connect to a Sliver C2 server",
 	Long:  ``,
 	Run: func(cmd *cobra.Command, args []string) {
+		disableTUI, err := cmd.Flags().GetBool(disableTUIFlagStr)
+		if err != nil {
+			log.Printf("Failed to parse --%s flag %s\n", disableTUIFlagStr, err)
+			os.Exit(1)
+		}
+
 		force, err := cmd.Flags().GetBool(forceFlagStr)
 		if err != nil {
 			log.Printf("Failed to parse --%s flag %s\n", forceFlagStr, err)
@@ -147,11 +155,13 @@ var connectCmd = &cobra.Command{
 			cracker.AddServer(&config)
 		}
 
-		_, err = unix.IoctlGetWinsize(int(os.Stdout.Fd()), unix.TIOCGWINSZ)
-		if err == nil {
-			tui.StartTUI(cracker)
-		} else {
-			cracker.Start()
+		hasTTY := term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+		if disableTUI || !hasTTY {
+			enableStdoutLogging()
+			tui.StartLogOnly(cracker, os.Stdout)
+			return
 		}
+
+		tui.StartTUI(cracker)
 	},
 }
