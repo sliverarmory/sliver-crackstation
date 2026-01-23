@@ -165,3 +165,11 @@ var connectCmd = &cobra.Command{
 		tui.StartTUI(cracker)
 	},
 }
+
+func runConnectWithArgs(args []string) error {
+	connectCmd.SetArgs(args)
+	connectCmd.SetIn(os.Stdin)
+	connectCmd.SetOut(os.Stdout)
+	connectCmd.SetErr(os.Stderr)
+	return connectCmd.Execute()
+}

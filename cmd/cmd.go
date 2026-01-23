@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 
 	"github.com/sliverarmory/sliver-crackstation/assets"
+	"github.com/sliverarmory/sliver-crackstation/pkg/config"
 	"github.com/spf13/cobra"
 )
 
@@ -90,7 +91,27 @@ var rootCmd = &cobra.Command{
 	Short: "GPU accelerated password cracking integration for Sliver C2",
 	Long:  ``,
 	Run: func(cmd *cobra.Command, args []string) {
-		os.Exit(0)
+		configPath := config.DefaultPath(assets.GetRootAppDir())
+		cfg, err := config.Load(configPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				_ = cmd.Help()
+				return
+			}
+			fmt.Printf("Failed to read config %s: %v\n", configPath, err)
+			os.Exit(1)
+		}
+
+		connectArgs, err := cfg.ConnectArgs()
+		if err != nil {
+			fmt.Printf("Failed to build connect args: %v\n", err)
+			os.Exit(1)
+		}
+
+		if err := runConnectWithArgs(connectArgs); err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
 	},
 }
 

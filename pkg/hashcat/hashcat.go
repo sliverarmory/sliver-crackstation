@@ -48,6 +48,7 @@ type Hashcat struct {
 	exe        string
 	cwd        string
 	hashcatDir string
+	version    string
 
 	CUDABackend   []*clientpb.CUDABackendInfo
 	MetalBackend  []*clientpb.MetalBackendInfo
@@ -345,9 +346,13 @@ func (h *Hashcat) parseOpenCLDevice(index int, lines []string) *clientpb.OpenCLB
 }
 
 func (h *Hashcat) Version() string {
+	if h.version != "" {
+		return h.version
+	}
 	data, err := h.hashcatCmd([]string{"--version"})
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(data))
+	h.version = strings.TrimSpace(string(data))
+	return h.version
 }
