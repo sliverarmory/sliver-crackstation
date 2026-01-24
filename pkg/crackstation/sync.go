@@ -171,7 +171,7 @@ func (c *Crackstation) downloadCrackFile(server *SliverServer, crackFile *client
 	digest := sha256.New()
 	decompressorTee := io.TeeReader(decompressor, digest)
 	_, err = io.Copy(downloadToFile, decompressorTee)
-	if err != io.ErrUnexpectedEOF {
+	if err != nil && err != io.ErrUnexpectedEOF {
 		os.Remove(downloadToFile.Name())
 		return err
 	}

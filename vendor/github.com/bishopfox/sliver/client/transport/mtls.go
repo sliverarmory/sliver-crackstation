@@ -29,7 +29,6 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/keepalive"
 
 	"github.com/bishopfox/sliver/client/assets"
 	"github.com/bishopfox/sliver/protobuf/rpcpb"
@@ -45,17 +44,6 @@ const (
 
 	defaultTimeout = time.Duration(10 * time.Second)
 )
-
-var keepaliveParams = keepalive.ClientParameters{
-	Time:                30 * time.Second,
-	Timeout:             10 * time.Second,
-	PermitWithoutStream: true,
-}
-
-// SetKeepaliveParams overrides the default gRPC keepalive settings.
-func SetKeepaliveParams(params keepalive.ClientParameters) {
-	keepaliveParams = params
-}
 
 type TokenAuth struct {
 	token string
@@ -84,8 +72,10 @@ func MTLSConnect(config *assets.ClientConfig) (rpcpb.SliverRPCClient, *grpc.Clie
 		grpc.WithTransportCredentials(transportCreds),
 		grpc.WithPerRPCCredentials(callCreds),
 		grpc.WithBlock(),
-		grpc.WithKeepaliveParams(keepaliveParams),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(ClientMaxReceiveMessageSize)),
+	}
+	if params := getKeepaliveParams(); params != nil {
+		options = append(options, grpc.WithKeepaliveParams(*params))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
 	defer cancel()
