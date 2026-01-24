@@ -104,8 +104,14 @@ func StartLogOnly(crack *crackstation.Crackstation, out io.Writer) {
 	statusSub := crack.StatusBroker.Subscribe()
 	defer crack.StatusBroker.Unsubscribe(statusSub)
 
+	var lastKey string
 	for status := range statusSub {
+		key := statusKey(status)
+		if key == lastKey {
+			continue
+		}
 		fmt.Fprintln(out, formatStatusLine(status, time.Now()))
+		lastKey = key
 	}
 }
 
@@ -640,6 +646,19 @@ func formatStatusLine(status *clientpb.CrackstationStatus, now time.Time) string
 		status.GetName(),
 		status.GetState().String(),
 		crackSummary(status, now),
+		syncSummary(status),
+	)
+}
+
+func statusKey(status *clientpb.CrackstationStatus) string {
+	if status == nil {
+		return "status unavailable"
+	}
+	return fmt.Sprintf(
+		"name=%s state=%s crack=%s sync=%s",
+		status.GetName(),
+		status.GetState().String(),
+		crackSummary(status, time.Time{}),
 		syncSummary(status),
 	)
 }

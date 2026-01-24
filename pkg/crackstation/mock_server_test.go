@@ -33,6 +33,7 @@ type mockSliverRPC struct {
 	CrackFileChunkDownloadFunc func(context.Context, *clientpb.CrackFileChunk) (*clientpb.CrackFileChunk, error)
 	CrackTaskByIDFunc          func(context.Context, *clientpb.CrackTask) (*clientpb.CrackTask, error)
 	CrackTaskUpdateFunc        func(context.Context, *clientpb.CrackTask) (*commonpb.Empty, error)
+	CrackstationBenchmarkFunc  func(context.Context, *clientpb.CrackBenchmark) (*commonpb.Empty, error)
 }
 
 func (m *mockSliverRPC) CrackstationRegister(req *clientpb.Crackstation, stream rpcpb.SliverRPC_CrackstationRegisterServer) error {
@@ -68,6 +69,13 @@ func (m *mockSliverRPC) CrackTaskUpdate(ctx context.Context, req *clientpb.Crack
 		return m.CrackTaskUpdateFunc(ctx, req)
 	}
 	return nil, status.Error(codes.Unimplemented, "CrackTaskUpdate not implemented")
+}
+
+func (m *mockSliverRPC) CrackstationBenchmark(ctx context.Context, req *clientpb.CrackBenchmark) (*commonpb.Empty, error) {
+	if m.CrackstationBenchmarkFunc != nil {
+		return m.CrackstationBenchmarkFunc(ctx, req)
+	}
+	return nil, status.Error(codes.Unimplemented, "CrackstationBenchmark not implemented")
 }
 
 func newBufConnClient(t *testing.T, mock *mockSliverRPC) rpcpb.SliverRPCClient {
