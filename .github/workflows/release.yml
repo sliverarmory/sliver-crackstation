@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure tag is on main
+        run: |
+          git fetch origin main --depth=1
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "Tag is not on main; skipping release."
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build binaries
+        run: |
+          mkdir -p dist
+          GOOS=windows GOARCH=amd64 go build -trimpath -mod=vendor -o dist/sliver-crackstation_windows-amd64 ./
+          GOOS=linux GOARCH=amd64 go build -trimpath -mod=vendor -o dist/sliver-crackstation_linux-amd64 ./
+          GOOS=darwin GOARCH=arm64 go build -trimpath -mod=vendor -o dist/sliver-crackstation_darwin-arm64 ./
+
+      - name: Create GitHub release and upload binaries
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag_name="${GITHUB_REF_NAME}"
+          gh release create "$tag_name" \
+            dist/sliver-crackstation_windows-amd64 \
+            dist/sliver-crackstation_linux-amd64 \
+            dist/sliver-crackstation_darwin-arm64 \
+            --title "$tag_name" \
+            --generate-notes
