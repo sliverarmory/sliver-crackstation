@@ -255,6 +255,28 @@ func (c *Crackstation) handleEvent(server *SliverServer, event *clientpb.Event) 
 	switch event.EventType {
 
 	case consts.CrackStr:
+		c.crackLock.Lock()
+		defer c.crackLock.Unlock()
+		task, err := server.fetchTask(event.Data)
+		if err != nil {
+			log.Printf("Error fetching task: %v", err)
+			return
+		}
+		log.Printf("Cracking task %s ...", task.ID)
+		c.currentCrackJobID = task.ID
+		defer func() { c.currentCrackJobID = "" }()
+		task.StartedAt = time.Now().Unix()
+		server.saveTask(task)
+
+		_, err = c.hashcat.Crack(task.Command)
+		if err != nil {
+			log.Printf("Error running crack task: %v", err)
+			task.Err = err.Error()
+		}
+		task.CompletedAt = time.Now().Unix()
+		if err := server.saveTask(task); err != nil {
+			log.Printf("Error finalizing task: %v", err)
+		}
 
 	case consts.CrackBenchmark:
 		c.crackLock.Lock()

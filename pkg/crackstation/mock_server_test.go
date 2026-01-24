@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bishopfox/sliver/protobuf/clientpb"
+	"github.com/bishopfox/sliver/protobuf/commonpb"
 	"github.com/bishopfox/sliver/protobuf/rpcpb"
 	"github.com/klauspost/compress/zstd"
 	"google.golang.org/grpc"
@@ -30,6 +31,8 @@ type mockSliverRPC struct {
 	CrackstationRegisterFunc   func(*clientpb.Crackstation, rpcpb.SliverRPC_CrackstationRegisterServer) error
 	CrackFilesListFunc         func(context.Context, *clientpb.CrackFile) (*clientpb.CrackFiles, error)
 	CrackFileChunkDownloadFunc func(context.Context, *clientpb.CrackFileChunk) (*clientpb.CrackFileChunk, error)
+	CrackTaskByIDFunc          func(context.Context, *clientpb.CrackTask) (*clientpb.CrackTask, error)
+	CrackTaskUpdateFunc        func(context.Context, *clientpb.CrackTask) (*commonpb.Empty, error)
 }
 
 func (m *mockSliverRPC) CrackstationRegister(req *clientpb.Crackstation, stream rpcpb.SliverRPC_CrackstationRegisterServer) error {
@@ -51,6 +54,20 @@ func (m *mockSliverRPC) CrackFileChunkDownload(ctx context.Context, req *clientp
 		return m.CrackFileChunkDownloadFunc(ctx, req)
 	}
 	return nil, status.Error(codes.Unimplemented, "CrackFileChunkDownload not implemented")
+}
+
+func (m *mockSliverRPC) CrackTaskByID(ctx context.Context, req *clientpb.CrackTask) (*clientpb.CrackTask, error) {
+	if m.CrackTaskByIDFunc != nil {
+		return m.CrackTaskByIDFunc(ctx, req)
+	}
+	return nil, status.Error(codes.Unimplemented, "CrackTaskByID not implemented")
+}
+
+func (m *mockSliverRPC) CrackTaskUpdate(ctx context.Context, req *clientpb.CrackTask) (*commonpb.Empty, error) {
+	if m.CrackTaskUpdateFunc != nil {
+		return m.CrackTaskUpdateFunc(ctx, req)
+	}
+	return nil, status.Error(codes.Unimplemented, "CrackTaskUpdate not implemented")
 }
 
 func newBufConnClient(t *testing.T, mock *mockSliverRPC) rpcpb.SliverRPCClient {

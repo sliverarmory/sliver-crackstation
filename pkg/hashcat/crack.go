@@ -21,6 +21,7 @@ package hashcat
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/bishopfox/sliver/protobuf/clientpb"
@@ -175,14 +176,24 @@ func (h *Hashcat) parseUserTaskArgs(cmd *clientpb.CrackCommand) ([]string, []str
 		args = append(args, "--potfile-disable")
 	}
 	if len(cmd.Potfile) != 0 {
-		tmp, err := os.CreateTemp(appTmpDir, "potfile")
-		if err != nil {
-			return nil, cleanup, err
+		potfilePath := ""
+		candidate := string(cmd.Potfile)
+		if filepath.IsAbs(candidate) {
+			if _, err := os.Stat(candidate); err == nil {
+				potfilePath = candidate
+			}
 		}
-		tmp.Write(cmd.Potfile)
-		tmp.Close()
-		cleanup = append(cleanup, tmp.Name())
-		args = append(args, fmt.Sprintf("--potfile=%s", tmp.Name()))
+		if potfilePath == "" {
+			tmp, err := os.CreateTemp(appTmpDir, "potfile")
+			if err != nil {
+				return nil, cleanup, err
+			}
+			tmp.Write(cmd.Potfile)
+			tmp.Close()
+			cleanup = append(cleanup, tmp.Name())
+			potfilePath = tmp.Name()
+		}
+		args = append(args, fmt.Sprintf("--potfile-path=%s", potfilePath))
 	}
 	if cmd.EncodingFrom != clientpb.CrackEncoding_INVALID_ENCODING {
 		args = append(args, fmt.Sprintf("--encoding-from=%s", cmd.EncodingFrom.String()))
@@ -314,6 +325,27 @@ func (h *Hashcat) parseUserTaskArgs(cmd *clientpb.CrackCommand) ([]string, []str
 	if cmd.Keyspace {
 		args = append(args, "--keyspace")
 	}
+	if cmd.CustomCharset1 != "" {
+		args = append(args, fmt.Sprintf("--custom-charset1=%s", cmd.CustomCharset1))
+	}
+	if cmd.CustomCharset2 != "" {
+		args = append(args, fmt.Sprintf("--custom-charset2=%s", cmd.CustomCharset2))
+	}
+	if cmd.CustomCharset3 != "" {
+		args = append(args, fmt.Sprintf("--custom-charset3=%s", cmd.CustomCharset3))
+	}
+	if cmd.CustomCharset4 != "" {
+		args = append(args, fmt.Sprintf("--custom-charset4=%s", cmd.CustomCharset4))
+	}
+	if cmd.Increment {
+		args = append(args, "--increment")
+		if cmd.IncrementMin != 0 {
+			args = append(args, fmt.Sprintf("--increment-min=%d", cmd.IncrementMin))
+		}
+		if cmd.IncrementMax != 0 {
+			args = append(args, fmt.Sprintf("--increment-max=%d", cmd.IncrementMax))
+		}
+	}
 	if len(cmd.RulesFile) != 0 {
 		tmp, err := os.CreateTemp(appTmpDir, "rules")
 		if err != nil {
@@ -325,6 +357,21 @@ func (h *Hashcat) parseUserTaskArgs(cmd *clientpb.CrackCommand) ([]string, []str
 		args = append(args, fmt.Sprintf("--rules=%s", tmp.Name()))
 	}
 	// rules
+	if len(cmd.Hashes) != 0 {
+		tmp, err := os.CreateTemp(appTmpDir, "hashes")
+		if err != nil {
+			return nil, cleanup, err
+		}
+		for _, hash := range cmd.Hashes {
+			_, _ = tmp.WriteString(hash + "\n")
+		}
+		tmp.Close()
+		cleanup = append(cleanup, tmp.Name())
+		args = append(args, tmp.Name())
+	}
+	if cmd.Identify != "" {
+		args = append(args, cmd.Identify)
+	}
 
 	return args, cleanup, nil
 }
