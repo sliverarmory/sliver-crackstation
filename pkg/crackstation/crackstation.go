@@ -104,10 +104,11 @@ func (c *Crackstation) roundRobinConnect(interval time.Duration) {
 			close(c.roundRobinStop)
 			return
 		case <-time.After(interval):
+			now := time.Now()
 			c.Servers.Range(func(_, value interface{}) bool {
 				server := value.(*SliverServer)
-				server.refreshState()
-				if server.State != CONNECTED {
+				server.refreshState(now)
+				if server.State == DISCONNECTED && server.readyToDial(now) {
 					go server.Connect()
 				}
 				return true
@@ -166,7 +167,7 @@ func (c *Crackstation) Start() {
 	c.done = make(chan struct{})
 	defer close(c.done)
 
-	go c.roundRobinConnect(5 * time.Second)
+	go c.roundRobinConnect(1 * time.Second)
 	defer func() { c.roundRobinStop <- struct{}{} }()
 
 	for {
@@ -327,7 +328,9 @@ func (c *Crackstation) AddServer(config *sliverClientAssets.ClientConfig) *Slive
 		State:        DISCONNECTED,
 		Crackstation: c,
 
-		connectLock: &sync.Mutex{},
+		connectLock:       &sync.Mutex{},
+		reconnectInterval: defaultReconnectInterval,
+		reconnectLock:     &sync.Mutex{},
 	})
 	return server.(*SliverServer)
 }
@@ -337,6 +340,8 @@ const (
 	CONNECTED    = "CONNECTED"
 	CONNECTING   = "CONNECTING"
 )
+
+const defaultReconnectInterval = 30 * time.Second
 
 // SliverServer - A single sliver server, this manages the connection to the
 // to the server and events going to/from the server
@@ -348,6 +353,10 @@ type SliverServer struct {
 	ln           *grpc.ClientConn
 
 	connectLock *sync.Mutex
+
+	reconnectInterval time.Duration
+	reconnectAt       time.Time
+	reconnectLock     *sync.Mutex
 }
 
 func (s *SliverServer) Connect() {
@@ -363,10 +372,12 @@ func (s *SliverServer) Connect() {
 	var err error
 	s.rpc, s.ln, err = transport.MTLSConnect(s.Config)
 	if err != nil {
+		s.scheduleReconnect()
 		slog.Error("Connection to server failed", "err", err)
 		return
 	}
 	s.State = CONNECTED
+	s.clearReconnectSchedule()
 	s.sendBenchmarkOnConnect()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -374,6 +385,7 @@ func (s *SliverServer) Connect() {
 	// Feed events into crackstation event channel
 	events, err := s.Events(ctx)
 	if err != nil {
+		s.scheduleReconnect()
 		slog.Error("Error establishing events channel", "err", err)
 		return
 	}
@@ -383,6 +395,8 @@ func (s *SliverServer) Connect() {
 	for event := range events {
 		s.Crackstation.Events <- &ServerEvent{Server: s, Event: event}
 	}
+
+	s.scheduleReconnect()
 }
 
 func (s *SliverServer) sendBenchmarkOnConnect() {
@@ -434,7 +448,7 @@ func (s *SliverServer) Events(ctx context.Context) (<-chan *clientpb.Event, erro
 	return events, nil
 }
 
-func (s *SliverServer) refreshState() {
+func (s *SliverServer) refreshState(now time.Time) {
 	if s.State != CONNECTED || s.ln == nil {
 		return
 	}
@@ -445,6 +459,7 @@ func (s *SliverServer) refreshState() {
 		s.State = CONNECTING
 	case connectivity.TransientFailure, connectivity.Shutdown:
 		s.State = DISCONNECTED
+		s.scheduleReconnectAt(now)
 		_ = s.ln.Close()
 	}
 }
@@ -462,6 +477,7 @@ func (s *SliverServer) watchConn(ctx context.Context, cancel context.CancelFunc)
 			s.State = CONNECTING
 		case connectivity.TransientFailure, connectivity.Shutdown:
 			s.State = DISCONNECTED
+			s.scheduleReconnect()
 			cancel()
 			_ = s.ln.Close()
 			return
@@ -501,4 +517,58 @@ func (s *SliverServer) uploadBenchmarkResult(task *clientpb.CrackTask, benchmark
 		Benchmarks: benchmark,
 	})
 	return err
+}
+
+func (s *SliverServer) readyToDial(now time.Time) bool {
+	if s.reconnectLock == nil {
+		return true
+	}
+	s.reconnectLock.Lock()
+	defer s.reconnectLock.Unlock()
+	if s.reconnectAt.IsZero() {
+		return true
+	}
+	return !now.Before(s.reconnectAt)
+}
+
+func (s *SliverServer) ReconnectIn(now time.Time) time.Duration {
+	if s.reconnectLock == nil {
+		return 0
+	}
+	s.reconnectLock.Lock()
+	defer s.reconnectLock.Unlock()
+	if s.reconnectAt.IsZero() {
+		return 0
+	}
+	remaining := s.reconnectAt.Sub(now)
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
+}
+
+func (s *SliverServer) scheduleReconnect() {
+	s.scheduleReconnectAt(time.Now())
+}
+
+func (s *SliverServer) scheduleReconnectAt(now time.Time) {
+	if s.reconnectLock == nil {
+		return
+	}
+	s.reconnectLock.Lock()
+	defer s.reconnectLock.Unlock()
+	interval := s.reconnectInterval
+	if interval <= 0 {
+		interval = defaultReconnectInterval
+	}
+	s.reconnectAt = now.Add(interval)
+}
+
+func (s *SliverServer) clearReconnectSchedule() {
+	if s.reconnectLock == nil {
+		return
+	}
+	s.reconnectLock.Lock()
+	s.reconnectAt = time.Time{}
+	s.reconnectLock.Unlock()
 }

@@ -547,14 +547,24 @@ func (m crackstationModel) grpcStatus() string {
 	if total == 0 {
 		return "gRPC: none"
 	}
+	pending, next := reconnectSummary(m.crack, time.Now())
 	if connected == total {
 		return fmt.Sprintf("gRPC: connected (%d)", connected)
 	}
 	if connected > 0 {
+		if pending > 0 && next > 0 {
+			return fmt.Sprintf("gRPC: partial (%d/%d, retry in %s)", connected, total, humanizeDuration(next))
+		}
 		return fmt.Sprintf("gRPC: partial (%d/%d)", connected, total)
 	}
 	if connecting > 0 {
+		if pending > 0 && next > 0 {
+			return fmt.Sprintf("gRPC: connecting (%d, retry in %s)", connecting, humanizeDuration(next))
+		}
 		return fmt.Sprintf("gRPC: connecting (%d)", connecting)
+	}
+	if pending > 0 && next > 0 {
+		return fmt.Sprintf("gRPC: reconnecting in %s (%d)", humanizeDuration(next), pending)
 	}
 	return fmt.Sprintf("gRPC: disconnected (%d)", total)
 }
@@ -568,14 +578,24 @@ func (m crackstationModel) renderGRPCStatus() string {
 	if total == 0 {
 		return strings.Join([]string{label, grpcUnavailableStyle.Render("none")}, " ")
 	}
+	pending, next := reconnectSummary(m.crack, time.Now())
 	if connected == total {
 		return strings.Join([]string{label, grpcConnectedStyle.Render(fmt.Sprintf("connected (%d)", connected))}, " ")
 	}
 	if connected > 0 {
+		if pending > 0 && next > 0 {
+			return strings.Join([]string{label, grpcPartialStyle.Render(fmt.Sprintf("partial (%d/%d, retry in %s)", connected, total, humanizeDuration(next)))}, " ")
+		}
 		return strings.Join([]string{label, grpcPartialStyle.Render(fmt.Sprintf("partial (%d/%d)", connected, total))}, " ")
 	}
 	if connecting > 0 {
+		if pending > 0 && next > 0 {
+			return strings.Join([]string{label, grpcConnectingStyle.Render(fmt.Sprintf("connecting (%d, retry in %s)", connecting, humanizeDuration(next)))}, " ")
+		}
 		return strings.Join([]string{label, grpcConnectingStyle.Render(fmt.Sprintf("connecting (%d)", connecting))}, " ")
+	}
+	if pending > 0 && next > 0 {
+		return strings.Join([]string{label, grpcConnectingStyle.Render(fmt.Sprintf("reconnecting in %s (%d)", humanizeDuration(next), pending))}, " ")
 	}
 	return strings.Join([]string{label, grpcDisconnectedStyle.Render(fmt.Sprintf("disconnected (%d)", total))}, " ")
 }
@@ -626,6 +646,30 @@ func countServerStates(crack *crackstation.Crackstation) (int, int, int) {
 		return true
 	})
 	return total, connected, connecting
+}
+
+func reconnectSummary(crack *crackstation.Crackstation, now time.Time) (int, time.Duration) {
+	if crack == nil || crack.Servers == nil {
+		return 0, 0
+	}
+	pending := 0
+	var next time.Duration
+	crack.Servers.Range(func(_, value interface{}) bool {
+		server, ok := value.(*crackstation.SliverServer)
+		if !ok || server == nil || server.State != crackstation.DISCONNECTED {
+			return true
+		}
+		remaining := server.ReconnectIn(now)
+		if remaining <= 0 {
+			return true
+		}
+		pending++
+		if next == 0 || remaining < next {
+			next = remaining
+		}
+		return true
+	})
+	return pending, next
 }
 
 func waitForStatus(ch chan *clientpb.CrackstationStatus) tea.Cmd {
