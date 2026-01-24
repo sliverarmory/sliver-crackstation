@@ -40,7 +40,6 @@ jobs:
       - name: Make
         working-directory: .
         run: |
-          ./go-assets.sh
           make linux
           make windows
 
