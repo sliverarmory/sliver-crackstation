@@ -34,7 +34,7 @@ jobs:
       - name: Build binaries
         run: |
           mkdir -p dist
-          GOOS=windows GOARCH=amd64 go build -trimpath -mod=vendor -o dist/sliver-crackstation_windows-amd64 ./
+          GOOS=windows GOARCH=amd64 go build -trimpath -mod=vendor -o dist/sliver-crackstation_windows-amd64.exe ./
           GOOS=linux GOARCH=amd64 go build -trimpath -mod=vendor -o dist/sliver-crackstation_linux-amd64 ./
           GOOS=darwin GOARCH=arm64 go build -trimpath -mod=vendor -o dist/sliver-crackstation_darwin-arm64 ./
 
@@ -44,7 +44,7 @@ jobs:
         run: |
           tag_name="${GITHUB_REF_NAME}"
           gh release create "$tag_name" \
-            dist/sliver-crackstation_windows-amd64 \
+            dist/sliver-crackstation_windows-amd64.exe \
             dist/sliver-crackstation_linux-amd64 \
             dist/sliver-crackstation_darwin-arm64 \
             --title "$tag_name" \
