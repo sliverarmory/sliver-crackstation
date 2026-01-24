@@ -21,7 +21,8 @@ type ConnectConfig struct {
 }
 
 type Config struct {
-	Connect ConnectConfig `yaml:"connect"`
+	LogLevel string        `yaml:"logLevel"`
+	Connect  ConnectConfig `yaml:"connect"`
 }
 
 func DefaultPath(appDir string) string {

@@ -3,7 +3,8 @@ package tui
 import (
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -93,7 +94,8 @@ func StartTUI(crack *crackstation.Crackstation) {
 
 	p := tea.NewProgram(newModel(crack, statusSub), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
-		log.Fatal(err)
+		slog.Error("TUI failed", "err", err)
+		os.Exit(1)
 	}
 }
 

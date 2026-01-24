@@ -20,7 +20,7 @@ package hashcat
 
 import (
 	"bytes"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,7 +56,7 @@ type Hashcat struct {
 }
 
 func (h *Hashcat) hashcatCmd(args []string) ([]byte, error) {
-	log.Printf("[hashcat] %s %s", h.exe, strings.Join(args, " "))
+	slog.Debug("Executing hashcat", "exe", h.exe, "args", strings.Join(args, " "))
 	cmd := exec.Command(h.exe, args...)
 	cmd.Dir = h.cwd
 	cmd.Env = os.Environ()
@@ -66,13 +66,13 @@ func (h *Hashcat) hashcatCmd(args []string) ([]byte, error) {
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err != nil {
-		log.Printf("[hashcat] --- env ---\n")
+		slog.Error("Hashcat command failed", "err", err)
+		slog.Debug("Hashcat env dump start")
 		for _, envVar := range cmd.Env {
-			log.Printf("%s\n", envVar)
+			slog.Debug("Hashcat env", "var", envVar)
 		}
-		log.Printf("[hashcat] --- stdout ---\n%s\n", stdout.String())
-		log.Printf("[hashcat] --- stderr ---\n%s\n", stderr.String())
-		log.Println(err)
+		slog.Debug("Hashcat stdout", "output", stdout.String())
+		slog.Debug("Hashcat stderr", "output", stderr.String())
 	}
 	return stdout.Bytes(), err
 }

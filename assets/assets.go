@@ -20,7 +20,7 @@ package assets
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/user"
 	"path"
@@ -73,7 +73,8 @@ func GetRootAppDir() string {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		err = os.MkdirAll(dir, 0700)
 		if err != nil {
-			log.Fatalf("Cannot write to sliver root dir %s", err)
+			slog.Error("Cannot write to sliver root dir", "err", err)
+			os.Exit(1)
 		}
 	}
 	return dir
@@ -85,7 +86,8 @@ func GetAppTmpDir() string {
 	if _, err := os.Stat(tmpDir); os.IsNotExist(err) {
 		err = os.MkdirAll(tmpDir, 0700)
 		if err != nil {
-			log.Fatalf("Cannot write to sliver tmp dir %s", err)
+			slog.Error("Cannot write to sliver tmp dir", "err", err)
+			os.Exit(1)
 		}
 	}
 	return tmpDir
@@ -97,7 +99,8 @@ func GetHashcatDir() string {
 	if _, err := os.Stat(hashcatDir); os.IsNotExist(err) {
 		err = os.MkdirAll(hashcatDir, 0700)
 		if err != nil {
-			log.Fatalf("Cannot write to sliver hashcat dir %s", err)
+			slog.Error("Cannot write to sliver hashcat dir", "err", err)
+			os.Exit(1)
 		}
 	}
 	return hashcatDir
@@ -108,7 +111,7 @@ func Setup(force bool, echo bool) {
 	appDir := GetRootAppDir()
 	localVer := assetVersion()
 	if force || localVer == "" || localVer != Revision {
-		log.Printf("Version mismatch %v != %v", localVer, Revision)
+		slog.Info("Asset version mismatch", "local", localVer, "expected", Revision)
 		if echo {
 			fmt.Printf(`
 Sliver Crackstation  Copyright (C) 2022  Bishop Fox
@@ -119,17 +122,18 @@ under certain conditions; type 'licenses' for details.`)
 		}
 		err := unpackAssets(appDir)
 		if err != nil {
-			log.Fatalf("Failed to unpack assets %s", err)
+			slog.Error("Failed to unpack assets", "err", err)
+			os.Exit(1)
 		}
 		saveAssetVersion(appDir)
 	}
 }
 
 func unpackAssets(appDir string) error {
-	log.Printf("Unpacking assets to '%s' ...", appDir)
+	slog.Info("Unpacking assets", "path", appDir)
 	err := unpackHashcat(appDir)
 	if err != nil {
-		log.Printf("Failed to unpack hashcat %s", err)
+		slog.Error("Failed to unpack hashcat", "err", err)
 		return err
 	}
 	return nil
@@ -138,14 +142,14 @@ func unpackAssets(appDir string) error {
 func unpackHashcat(appDir string) error {
 	hashcatDir := GetHashcatDir()
 	if _, err := os.Stat(hashcatDir); !os.IsNotExist(err) {
-		log.Printf("Hashcat already exists at '%s', removing old version ...", hashcatDir)
+		slog.Info("Hashcat already exists, removing old version", "path", hashcatDir)
 		err = util.ChmodR(hashcatDir, 0600, 0700)
 		if err != nil {
-			log.Printf("Failed to chmod hashcat dir %s", err)
+			slog.Warn("Failed to chmod hashcat dir", "err", err)
 		}
 		err = os.RemoveAll(hashcatDir)
 		if err != nil {
-			log.Printf("Failed to remove hashcat dir %s", err)
+			slog.Warn("Failed to remove hashcat dir", "err", err)
 		}
 	}
 	// embed fs always uses '/' path separators regardless of GOOS
@@ -167,7 +171,7 @@ func assetVersion() string {
 	appDir := GetRootAppDir()
 	data, err := os.ReadFile(filepath.Join(appDir, versionFileName))
 	if err != nil {
-		log.Printf("No version detected %s", err)
+		slog.Warn("No version detected", "err", err)
 		return ""
 	}
 	return strings.TrimSpace(string(data))
@@ -177,7 +181,8 @@ func saveAssetVersion(appDir string) {
 	versionFilePath := filepath.Join(appDir, versionFileName)
 	fVer, err := os.Create(versionFilePath)
 	if err != nil {
-		log.Fatalf("Failed to create version file %s", err)
+		slog.Error("Failed to create version file", "err", err)
+		os.Exit(1)
 	}
 	defer fVer.Close()
 	fVer.Write([]byte(Revision))

@@ -24,7 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -198,12 +198,12 @@ func (c *Crackstation) Benchmark() error {
 		Benchmark:  true,
 	})
 	if err != nil {
-		log.Printf("Error running benchmark: %s", err)
+		slog.Error("Error running benchmark", "err", err)
 		return err
 	}
 	err = c.saveBenchmarkResults(benchmarkResults)
 	if err != nil {
-		log.Printf("Failed to save benchmark results: %s", err)
+		slog.Error("Failed to save benchmark results", "err", err)
 		return err
 	}
 	return nil
@@ -251,7 +251,7 @@ func (c *Crackstation) LoadBenchmarkResults() (map[int32]uint64, error) {
 }
 
 func (c *Crackstation) handleEvent(server *SliverServer, event *clientpb.Event) {
-	log.Printf("[event] %s", event.EventType)
+	slog.Info("Crackstation event", "type", event.EventType)
 	switch event.EventType {
 
 	case consts.CrackStr:
@@ -259,10 +259,10 @@ func (c *Crackstation) handleEvent(server *SliverServer, event *clientpb.Event) 
 		defer c.crackLock.Unlock()
 		task, err := server.fetchTask(event.Data)
 		if err != nil {
-			log.Printf("Error fetching task: %v", err)
+			slog.Error("Error fetching task", "err", err)
 			return
 		}
-		log.Printf("Cracking task %s ...", task.ID)
+		slog.Info("Cracking task", "task_id", task.ID)
 		c.currentCrackJobID = task.ID
 		defer func() { c.currentCrackJobID = "" }()
 		task.StartedAt = time.Now().Unix()
@@ -270,12 +270,12 @@ func (c *Crackstation) handleEvent(server *SliverServer, event *clientpb.Event) 
 
 		_, err = c.hashcat.Crack(task.Command)
 		if err != nil {
-			log.Printf("Error running crack task: %v", err)
+			slog.Error("Error running crack task", "err", err)
 			task.Err = err.Error()
 		}
 		task.CompletedAt = time.Now().Unix()
 		if err := server.saveTask(task); err != nil {
-			log.Printf("Error finalizing task: %v", err)
+			slog.Error("Error finalizing task", "err", err)
 		}
 
 	case consts.CrackBenchmark:
@@ -284,10 +284,10 @@ func (c *Crackstation) handleEvent(server *SliverServer, event *clientpb.Event) 
 		var err error
 		task, err := server.fetchTask(event.Data)
 		if err != nil {
-			log.Printf("Error fetching task: %v", err)
+			slog.Error("Error fetching task", "err", err)
 			return
 		}
-		log.Printf("Benchmarking crackstation ...")
+		slog.Info("Benchmarking crackstation")
 		c.currentCrackJobID = task.ID
 		defer func() { c.currentCrackJobID = "" }()
 		task.StartedAt = time.Now().Unix()
@@ -300,14 +300,14 @@ func (c *Crackstation) handleEvent(server *SliverServer, event *clientpb.Event) 
 		if err != nil {
 			err = c.Benchmark()
 			if err != nil {
-				log.Printf("Error running benchmark: %v", err)
+				slog.Error("Error running benchmark", "err", err)
 			}
 			results, err = c.LoadBenchmarkResults()
 		}
 		if err == nil {
 			err = server.uploadBenchmarkResult(task, results)
 			if err != nil {
-				log.Printf("Error uploading benchmark result: %v", err)
+				slog.Error("Error uploading benchmark result", "err", err)
 			}
 		}
 		if err != nil {
@@ -316,7 +316,7 @@ func (c *Crackstation) handleEvent(server *SliverServer, event *clientpb.Event) 
 		task.CompletedAt = time.Now().Unix()
 		err = server.saveTask(task)
 		if err != nil {
-			log.Printf("Error finalizing task: %v", err)
+			slog.Error("Error finalizing task", "err", err)
 		}
 	}
 }
@@ -359,21 +359,22 @@ func (s *SliverServer) Connect() {
 	defer func() { s.State = DISCONNECTED }()
 
 	s.State = CONNECTING
-	log.Printf("Connecting to server %s@%s:%d", s.Config.Operator, s.Config.LHost, s.Config.LPort)
+	slog.Info("Connecting to server", "operator", s.Config.Operator, "host", s.Config.LHost, "port", s.Config.LPort)
 	var err error
 	s.rpc, s.ln, err = transport.MTLSConnect(s.Config)
 	if err != nil {
-		log.Printf("Connection to server failed: %s", err)
+		slog.Error("Connection to server failed", "err", err)
 		return
 	}
 	s.State = CONNECTED
+	s.sendBenchmarkOnConnect()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Feed events into crackstation event channel
 	events, err := s.Events(ctx)
 	if err != nil {
-		log.Printf("Error establishing events channel: %v", err)
+		slog.Error("Error establishing events channel", "err", err)
 		return
 	}
 
@@ -382,6 +383,29 @@ func (s *SliverServer) Connect() {
 	for event := range events {
 		s.Crackstation.Events <- &ServerEvent{Server: s, Event: event}
 	}
+}
+
+func (s *SliverServer) sendBenchmarkOnConnect() {
+	if s.Crackstation == nil {
+		return
+	}
+	benchmarks, err := s.Crackstation.LoadBenchmarkResults()
+	if err != nil {
+		slog.Warn("Skipping benchmark upload; no cached benchmarks", "err", err)
+		return
+	}
+	name := s.Crackstation.Name
+	slog.Info("Uploading cached benchmarks", "entries", len(benchmarks))
+	_, err = s.rpc.CrackstationBenchmark(context.Background(), &clientpb.CrackBenchmark{
+		Name:       name,
+		HostUUID:   HostUUID,
+		Benchmarks: benchmarks,
+	})
+	if err != nil {
+		slog.Error("Failed to upload benchmarks", "err", err)
+		return
+	}
+	slog.Info("Uploaded cached benchmarks", "entries", len(benchmarks))
 }
 
 func (s *SliverServer) Events(ctx context.Context) (<-chan *clientpb.Event, error) {
@@ -397,11 +421,11 @@ func (s *SliverServer) Events(ctx context.Context) (<-chan *clientpb.Event, erro
 		for {
 			event, err := eventStream.Recv()
 			if err == io.EOF || event == nil {
-				log.Printf("Crackstation event stream closed: %v", err)
+				slog.Info("Crackstation event stream closed", "err", err)
 				return
 			}
 			if err != nil {
-				log.Printf("Error receiving cracking event: %v", err)
+				slog.Error("Error receiving cracking event", "err", err)
 				return
 			}
 			events <- event
@@ -457,7 +481,7 @@ func (s *SliverServer) fetchTask(taskID []byte) (*clientpb.CrackTask, error) {
 	if parsedTaskID == uuid.Nil {
 		return nil, fmt.Errorf("invalid task ID '%v'", taskID)
 	}
-	log.Printf("Fetching task: %s", parsedTaskID.String())
+	slog.Info("Fetching task", "task_id", parsedTaskID.String())
 	return s.rpc.CrackTaskByID(context.Background(), &clientpb.CrackTask{ID: parsedTaskID.String()})
 }
 

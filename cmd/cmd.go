@@ -21,9 +21,10 @@ package cmd
 import (
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/sliverarmory/sliver-crackstation/assets"
 	"github.com/sliverarmory/sliver-crackstation/pkg/config"
@@ -59,31 +60,70 @@ const (
 	Success = Bold + Green + "[+] " + Normal
 )
 
+const logLevelFlagStr = "log-level"
+
 func init() {
 	rootCmd.AddCommand(initConnectCmd())
 	rootCmd.AddCommand(initUnpackCmd())
 	rootCmd.AddCommand(versionCmd)
+	rootCmd.Flags().String(logLevelFlagStr, "", "Log level (debug, info, warn, error)")
 }
 
 var logFile *os.File
+var logLevelVar slog.LevelVar
 
 func initConsoleLogging(appDir string) *os.File {
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	openedFile, err := os.OpenFile(filepath.Join(appDir, "crackstation.log"), os.O_RDWR|os.O_CREATE|os.O_APPEND, 0600)
 	if err != nil {
-		log.Fatalf("Error opening file: %v", err)
+		fmt.Fprintf(os.Stderr, "Error opening log file: %v\n", err)
+		os.Exit(1)
 	}
-	log.SetOutput(openedFile)
+	setLoggerOutput(openedFile)
 	logFile = openedFile
 	return openedFile
 }
 
 func enableStdoutLogging() {
 	if logFile == nil {
-		log.SetOutput(os.Stdout)
+		setLoggerOutput(os.Stdout)
 		return
 	}
-	log.SetOutput(io.MultiWriter(logFile, os.Stdout))
+	setLoggerOutput(io.MultiWriter(logFile, os.Stdout))
+}
+
+func setLoggerOutput(w io.Writer) {
+	handler := slog.NewTextHandler(w, &slog.HandlerOptions{
+		AddSource: true,
+		Level:     &logLevelVar,
+	})
+	slog.SetDefault(slog.New(handler))
+}
+
+func configureLogLevel(level string) error {
+	if level == "" {
+		return nil
+	}
+	parsed, err := parseLogLevel(level)
+	if err != nil {
+		return err
+	}
+	logLevelVar.Set(parsed)
+	return nil
+}
+
+func parseLogLevel(level string) (slog.Level, error) {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info", "":
+		return slog.LevelInfo, nil
+	case "warn", "warning":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return slog.LevelInfo, fmt.Errorf("unknown log level %q", level)
+	}
 }
 
 var rootCmd = &cobra.Command{
@@ -91,6 +131,7 @@ var rootCmd = &cobra.Command{
 	Short: "GPU accelerated password cracking integration for Sliver C2",
 	Long:  ``,
 	Run: func(cmd *cobra.Command, args []string) {
+		logLevelFlag, _ := cmd.Flags().GetString(logLevelFlagStr)
 		cfg, configPath, err := config.LoadDefault(assets.GetRootAppDir())
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -98,6 +139,15 @@ var rootCmd = &cobra.Command{
 				return
 			}
 			fmt.Printf("Failed to read config %s: %v\n", configPath, err)
+			os.Exit(1)
+		}
+
+		logLevel := logLevelFlag
+		if logLevel == "" && cfg != nil && cfg.LogLevel != "" {
+			logLevel = cfg.LogLevel
+		}
+		if err := configureLogLevel(logLevel); err != nil {
+			fmt.Printf("Invalid log level: %v\n", err)
 			os.Exit(1)
 		}
 
@@ -111,6 +161,12 @@ var rootCmd = &cobra.Command{
 		if err != nil {
 			fmt.Printf("Failed to parse connect args: %v\n", err)
 			os.Exit(1)
+		}
+		if logLevel == "" && options.LogLevel != "" {
+			if err := configureLogLevel(options.LogLevel); err != nil {
+				fmt.Printf("Invalid log level: %v\n", err)
+				os.Exit(1)
+			}
 		}
 
 		if err := runConnectWithOptions(options); err != nil {

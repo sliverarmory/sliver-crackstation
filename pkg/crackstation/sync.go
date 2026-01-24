@@ -24,7 +24,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -68,7 +68,7 @@ func (c *Crackstation) SyncFiles(server *SliverServer) error {
 			defer wg.Done()
 			for crackFile := range files {
 				if err := c.downloadCrackFile(server, crackFile); err != nil {
-					log.Printf("[sync] Failed to download %s: %s", crackFile.Name, err)
+					slog.Error("Sync failed to download file", "file", crackFile.Name, "err", err)
 				}
 			}
 		}(files)
@@ -124,14 +124,14 @@ func (c *Crackstation) downloadCrackFile(server *SliverServer, crackFile *client
 	downloadToFilePath := filepath.Join(downloadToDir, filepath.Base(crackFile.Sha2_256))
 	if _, err := os.Stat(downloadToFilePath); err == nil {
 		c.SyncStatus.Progress[crackFile.Sha2_256] = 1.0
-		log.Printf("[sync] File %s already exists, skipping", downloadToFilePath)
+		slog.Info("Sync file already exists, skipping", "path", downloadToFilePath)
 		return nil
 	}
 	downloadToFile, err := os.OpenFile(downloadToFilePath, os.O_RDWR|os.O_CREATE, 0600)
 	if err != nil {
 		return err
 	}
-	log.Printf("[sync] Downloading '%s' (%d bytes) to %s", crackFile.Name, crackFile.UncompressedSize, downloadToFile.Name())
+	slog.Info("Sync downloading file", "name", crackFile.Name, "bytes", crackFile.UncompressedSize, "path", downloadToFile.Name())
 
 	// Make sure we download in order
 	sort.Slice(crackFile.Chunks, func(i, j int) bool {
@@ -160,7 +160,7 @@ func (c *Crackstation) downloadCrackFile(server *SliverServer, crackFile *client
 				errors = append(errors, err)
 				continue
 			}
-			log.Printf("[sync] Downloaded chunk %s - %d/%d (%d bytes)", chunk.ID, chunk.N+1, len(crackFile.Chunks), len(dataChunk.Data))
+			slog.Debug("Sync downloaded chunk", "chunk_id", chunk.ID, "chunk", chunk.N+1, "total", len(crackFile.Chunks), "bytes", len(dataChunk.Data))
 			compressedStream.Write(dataChunk.Data)
 			c.syncBytes += len(dataChunk.Data)
 			c.SyncStatus.Progress[crackFile.Sha2_256] = float32(chunk.N+1) / float32(len(crackFile.Chunks))

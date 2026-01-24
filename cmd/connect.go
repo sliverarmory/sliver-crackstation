@@ -21,7 +21,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -60,6 +60,7 @@ func initConnectCmd() *cobra.Command {
 	connectCmd.Flags().Duration(grpcKeepaliveTimeFlagStr, minKeepaliveTime, "gRPC keepalive ping interval")
 	connectCmd.Flags().Duration(grpcKeepaliveTimeoutFlagStr, 20*time.Second, "gRPC keepalive ping timeout")
 	connectCmd.Flags().Bool(grpcKeepalivePermitWithoutStreamFlagStr, false, "Send gRPC keepalive pings when idle")
+	connectCmd.Flags().String(logLevelFlagStr, "", "Log level (debug, info, warn, error)")
 	return connectCmd
 }
 
@@ -68,14 +69,20 @@ var connectCmd = &cobra.Command{
 	Short: "Connect to a Sliver C2 server",
 	Long:  ``,
 	Run: func(cmd *cobra.Command, args []string) {
+		logLevel, _ := cmd.Flags().GetString(logLevelFlagStr)
+		if err := configureLogLevel(logLevel); err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid log level: %v\n", err)
+			os.Exit(1)
+		}
+
 		options, err := connectOptionsFromFlags(cmd.Flags())
 		if err != nil {
-			log.Printf("Failed to parse connect flags: %s", err)
+			slog.Error("Failed to parse connect flags", "err", err)
 			os.Exit(1)
 		}
 
 		if err := runConnectWithOptions(options); err != nil {
-			log.Printf("Failed to run connect: %s", err)
+			slog.Error("Failed to run connect", "err", err)
 			os.Exit(1)
 		}
 	},
@@ -90,6 +97,7 @@ type connectOptions struct {
 	KeepaliveTime                time.Duration
 	KeepaliveTimeout             time.Duration
 	KeepalivePermitWithoutStream bool
+	LogLevel                     string
 }
 
 func connectOptionsFromFlags(flags *pflag.FlagSet) (connectOptions, error) {
@@ -133,6 +141,11 @@ func connectOptionsFromFlags(flags *pflag.FlagSet) (connectOptions, error) {
 		return connectOptions{}, err
 	}
 
+	logLevel, err := flags.GetString(logLevelFlagStr)
+	if err != nil {
+		return connectOptions{}, err
+	}
+
 	return connectOptions{
 		Name:                         name,
 		OperatorConfig:               configPath,
@@ -142,6 +155,7 @@ func connectOptionsFromFlags(flags *pflag.FlagSet) (connectOptions, error) {
 		KeepaliveTime:                keepaliveTime,
 		KeepaliveTimeout:             keepaliveTimeout,
 		KeepalivePermitWithoutStream: keepalivePermitWithoutStream,
+		LogLevel:                     logLevel,
 	}, nil
 }
 
@@ -155,6 +169,7 @@ func parseConnectOptions(args []string) (connectOptions, error) {
 	flags.Duration(grpcKeepaliveTimeFlagStr, minKeepaliveTime, "gRPC keepalive ping interval")
 	flags.Duration(grpcKeepaliveTimeoutFlagStr, 20*time.Second, "gRPC keepalive ping timeout")
 	flags.Bool(grpcKeepalivePermitWithoutStreamFlagStr, false, "Send gRPC keepalive pings when idle")
+	flags.String(logLevelFlagStr, "", "Log level (debug, info, warn, error)")
 	if err := flags.Parse(args); err != nil {
 		return connectOptions{}, err
 	}
@@ -168,7 +183,7 @@ func runConnectWithOptions(options connectOptions) error {
 
 	assets.Setup(options.Force, true)
 	if options.KeepaliveTime < minKeepaliveTime {
-		log.Printf("gRPC keepalive time %s is too low; clamping to %s", options.KeepaliveTime, minKeepaliveTime)
+		slog.Warn("gRPC keepalive time too low; clamping", "requested", options.KeepaliveTime, "minimum", minKeepaliveTime)
 		options.KeepaliveTime = minKeepaliveTime
 	}
 	transport.SetKeepaliveParams(keepalive.ClientParameters{
@@ -187,16 +202,16 @@ func runConnectWithOptions(options connectOptions) error {
 	if name == "" {
 		name, err = os.Hostname()
 		if err != nil {
-			log.Printf("Failed to get hostname: %s", err)
+			slog.Warn("Failed to get hostname", "err", err)
 			name = fmt.Sprintf("%s's %s cracker", config.Operator, runtime.GOOS)
 		}
 	}
-	log.Printf("Hello my name is '%s'", name)
+	slog.Info("Crackstation name resolved", "name", name)
 
 	// initialize the hashcat
 	hashcatInstance := hashcat.NewHashcat(assets.GetHashcatDir())
-	log.Printf("[hashcat] %s", hashcatInstance.Version())
-	log.Printf("[hashcat] enumerating hashcat devices ...")
+	slog.Info("Hashcat version", "version", hashcatInstance.Version())
+	slog.Info("Enumerating hashcat devices")
 	fmt.Printf("Enumerating hashcat devices ... ")
 	err = hashcatInstance.BackendInfo()
 	if err != nil {
@@ -205,11 +220,11 @@ func runConnectWithOptions(options connectOptions) error {
 	}
 
 	metal, _ := json.Marshal(hashcatInstance.MetalBackend)
-	log.Printf("[hashcat] metal: %s", metal)
+	slog.Debug("Hashcat metal backend", "info", string(metal))
 	openCL, _ := json.Marshal(hashcatInstance.OpenCLBackend)
-	log.Printf("[hashcat] open-cl: %s", openCL)
+	slog.Debug("Hashcat opencl backend", "info", string(openCL))
 	cuda, _ := json.Marshal(hashcatInstance.CUDABackend)
-	log.Printf("[hashcat] cuda: %s", cuda)
+	slog.Debug("Hashcat cuda backend", "info", string(cuda))
 
 	if len(metal) == 0 && len(openCL) == 0 && len(cuda) == 0 {
 		fmt.Printf("no devices!\n")
@@ -221,7 +236,7 @@ func runConnectWithOptions(options connectOptions) error {
 	fmt.Printf(" OpenCL: %d device(s)\n", len(hashcatInstance.OpenCLBackend))
 	fmt.Printf("  Metal: %d device(s)\n", len(hashcatInstance.MetalBackend))
 
-	log.Printf("Initializing crackstation ...")
+	slog.Info("Initializing crackstation")
 	dataDir := filepath.Join(assets.GetRootAppDir(), "data")
 
 	cracker, err := crackstation.NewCrackstation(name, dataDir, hashcatInstance)
@@ -234,7 +249,7 @@ func runConnectWithOptions(options connectOptions) error {
 	}
 
 	for _, config := range configs {
-		log.Printf("Subscribing to %s:%d", config.LHost, config.LPort)
+		slog.Info("Subscribing to server", "host", config.LHost, "port", config.LPort)
 		cracker.AddServer(&config)
 	}
 
@@ -250,14 +265,14 @@ func runConnectWithOptions(options connectOptions) error {
 }
 
 func ensureBenchmarks(cracker *crackstation.Crackstation, force bool) error {
-	log.Printf("Checking benchmark cache ...")
+	slog.Info("Checking benchmark cache")
 	if !force {
 		if _, err := cracker.LoadBenchmarkResults(); err == nil {
 			return nil
 		}
 	}
 
-	log.Printf("Running hashcat benchmark ...")
+	slog.Info("Running hashcat benchmark")
 	fmt.Printf("Benchmarking system, please wait ... ")
 	if err := cracker.EnsureBenchmark(true); err != nil {
 		fmt.Printf("failure!\n")
