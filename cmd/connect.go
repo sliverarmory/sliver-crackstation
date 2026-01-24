@@ -49,15 +49,17 @@ const (
 	grpcKeepalivePermitWithoutStreamFlagStr = "grpc-keepalive-permit-without-stream"
 )
 
+const minKeepaliveTime = 5 * time.Minute
+
 func initConnectCmd() *cobra.Command {
 	connectCmd.Flags().StringP(nameFlagStr, "n", "", "Name of the crackstation (blank = hostname)")
 	connectCmd.Flags().StringP(operatorConfigFlagStr, "c", "", "Path to operator config file")
 	connectCmd.Flags().Bool(forceFlagStr, false, "Force unpacking of assets")
 	connectCmd.Flags().Bool(disableTUIFlagStr, false, "Disable the TUI and log status to stdout")
 	connectCmd.Flags().Bool(forceBenchmarkFlagStr, false, "Always run hashcat benchmarks before starting")
-	connectCmd.Flags().Duration(grpcKeepaliveTimeFlagStr, 30*time.Second, "gRPC keepalive ping interval")
-	connectCmd.Flags().Duration(grpcKeepaliveTimeoutFlagStr, 10*time.Second, "gRPC keepalive ping timeout")
-	connectCmd.Flags().Bool(grpcKeepalivePermitWithoutStreamFlagStr, true, "Send gRPC keepalive pings when idle")
+	connectCmd.Flags().Duration(grpcKeepaliveTimeFlagStr, minKeepaliveTime, "gRPC keepalive ping interval")
+	connectCmd.Flags().Duration(grpcKeepaliveTimeoutFlagStr, 20*time.Second, "gRPC keepalive ping timeout")
+	connectCmd.Flags().Bool(grpcKeepalivePermitWithoutStreamFlagStr, false, "Send gRPC keepalive pings when idle")
 	return connectCmd
 }
 
@@ -150,9 +152,9 @@ func parseConnectOptions(args []string) (connectOptions, error) {
 	flags.Bool(forceFlagStr, false, "Force unpacking of assets")
 	flags.Bool(disableTUIFlagStr, false, "Disable the TUI and log status to stdout")
 	flags.Bool(forceBenchmarkFlagStr, false, "Always run hashcat benchmarks before starting")
-	flags.Duration(grpcKeepaliveTimeFlagStr, 30*time.Second, "gRPC keepalive ping interval")
-	flags.Duration(grpcKeepaliveTimeoutFlagStr, 10*time.Second, "gRPC keepalive ping timeout")
-	flags.Bool(grpcKeepalivePermitWithoutStreamFlagStr, true, "Send gRPC keepalive pings when idle")
+	flags.Duration(grpcKeepaliveTimeFlagStr, minKeepaliveTime, "gRPC keepalive ping interval")
+	flags.Duration(grpcKeepaliveTimeoutFlagStr, 20*time.Second, "gRPC keepalive ping timeout")
+	flags.Bool(grpcKeepalivePermitWithoutStreamFlagStr, false, "Send gRPC keepalive pings when idle")
 	if err := flags.Parse(args); err != nil {
 		return connectOptions{}, err
 	}
@@ -165,6 +167,10 @@ func runConnectWithOptions(options connectOptions) error {
 	}
 
 	assets.Setup(options.Force, true)
+	if options.KeepaliveTime < minKeepaliveTime {
+		log.Printf("gRPC keepalive time %s is too low; clamping to %s", options.KeepaliveTime, minKeepaliveTime)
+		options.KeepaliveTime = minKeepaliveTime
+	}
 	transport.SetKeepaliveParams(keepalive.ClientParameters{
 		Time:                options.KeepaliveTime,
 		Timeout:             options.KeepaliveTimeout,
