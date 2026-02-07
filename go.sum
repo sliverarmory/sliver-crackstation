@@ -6,8 +6,8 @@ github.com/aymanbagabas/go-osc52/v2 v2.0.1 h1:HwpRHbFMcZLEVr42D4p7XBqjyuxQH5SMiE
 github.com/aymanbagabas/go-osc52/v2 v2.0.1/go.mod h1:uYgXzlJ7ZpABp8OJ+exZzJJhRNQ2ASbcXHWsFqH8hp8=
 github.com/aymanbagabas/go-udiff v0.3.1 h1:LV+qyBQ2pqe0u42ZsUEtPiCaUoqgA9gYRDs3vj1nolY=
 github.com/aymanbagabas/go-udiff v0.3.1/go.mod h1:G0fsKmG+P6ylD0r6N/KgQD/nWzgfnl8ZBcNLgcbrw8E=
-github.com/bishopfox/sliver v1.6.11 h1:llTTSX2AyJkLXbBEiby4UZV5uo4/HPjAvasDk/h0CF0=
-github.com/bishopfox/sliver v1.6.11/go.mod h1:ku4KEp4q7rOWkG7L0ClUhk+2lPvGMZRZgOW0MD0YQlE=
+github.com/bishopfox/sliver v1.7.0 h1:dJJGF9x2uSaePo7gltKBTkGqcOaQm5FgazjGfzPx1/E=
+github.com/bishopfox/sliver v1.7.0/go.mod h1:U8b2bnNn333GAP71NK/qGhkCbrGiFw0ZtiDV9hf24CY=
 github.com/catppuccin/go v0.3.0 h1:d+0/YicIq+hSTo5oPuRi5kOpqkVA5tAsU6dNhvRu+aY=
 github.com/catppuccin/go v0.3.0/go.mod h1:8IHJuMGaUUjQM82qBrGNBv7LFq6JI3NnQCF6MOlZjpc=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=

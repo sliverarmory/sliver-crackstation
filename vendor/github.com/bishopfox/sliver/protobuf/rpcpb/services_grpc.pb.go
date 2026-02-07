@@ -98,6 +98,7 @@ type SliverRPCClient interface {
 	GetCertificateInfo(ctx context.Context, in *clientpb.CertificatesReq, opts ...grpc.CallOption) (*clientpb.CertificateInfo, error)
 	GetCertificateAuthorityInfo(ctx context.Context, in *commonpb.Empty, opts ...grpc.CallOption) (*clientpb.CertificateAuthorityInfo, error)
 	// *** Crackstation ***
+	Crack(ctx context.Context, in *clientpb.CrackCommand, opts ...grpc.CallOption) (*clientpb.CrackResponse, error)
 	CrackstationRegister(ctx context.Context, in *clientpb.Crackstation, opts ...grpc.CallOption) (SliverRPC_CrackstationRegisterClient, error)
 	CrackstationTrigger(ctx context.Context, in *clientpb.Event, opts ...grpc.CallOption) (*commonpb.Empty, error)
 	CrackstationBenchmark(ctx context.Context, in *clientpb.CrackBenchmark, opts ...grpc.CallOption) (*commonpb.Empty, error)
@@ -169,6 +170,7 @@ type SliverRPCClient interface {
 	Migrate(ctx context.Context, in *clientpb.MigrateReq, opts ...grpc.CallOption) (*sliverpb.Migrate, error)
 	Execute(ctx context.Context, in *sliverpb.ExecuteReq, opts ...grpc.CallOption) (*sliverpb.Execute, error)
 	ExecuteWindows(ctx context.Context, in *sliverpb.ExecuteWindowsReq, opts ...grpc.CallOption) (*sliverpb.Execute, error)
+	ExecuteChildren(ctx context.Context, in *sliverpb.ExecuteChildrenReq, opts ...grpc.CallOption) (*sliverpb.ExecuteChildren, error)
 	Sideload(ctx context.Context, in *sliverpb.SideloadReq, opts ...grpc.CallOption) (*sliverpb.Sideload, error)
 	SpawnDll(ctx context.Context, in *sliverpb.InvokeSpawnDllReq, opts ...grpc.CallOption) (*sliverpb.SpawnDll, error)
 	Screenshot(ctx context.Context, in *sliverpb.ScreenshotReq, opts ...grpc.CallOption) (*sliverpb.Screenshot, error)
@@ -823,6 +825,15 @@ func (c *sliverRPCClient) GetCertificateAuthorityInfo(ctx context.Context, in *c
 	return out, nil
 }
 
+func (c *sliverRPCClient) Crack(ctx context.Context, in *clientpb.CrackCommand, opts ...grpc.CallOption) (*clientpb.CrackResponse, error) {
+	out := new(clientpb.CrackResponse)
+	err := c.cc.Invoke(ctx, "/rpcpb.SliverRPC/Crack", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sliverRPCClient) CrackstationRegister(ctx context.Context, in *clientpb.Crackstation, opts ...grpc.CallOption) (SliverRPC_CrackstationRegisterClient, error) {
 	stream, err := c.cc.NewStream(ctx, &SliverRPC_ServiceDesc.Streams[2], "/rpcpb.SliverRPC/CrackstationRegister", opts...)
 	if err != nil {
@@ -1452,6 +1463,15 @@ func (c *sliverRPCClient) Execute(ctx context.Context, in *sliverpb.ExecuteReq, 
 func (c *sliverRPCClient) ExecuteWindows(ctx context.Context, in *sliverpb.ExecuteWindowsReq, opts ...grpc.CallOption) (*sliverpb.Execute, error) {
 	out := new(sliverpb.Execute)
 	err := c.cc.Invoke(ctx, "/rpcpb.SliverRPC/ExecuteWindows", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sliverRPCClient) ExecuteChildren(ctx context.Context, in *sliverpb.ExecuteChildrenReq, opts ...grpc.CallOption) (*sliverpb.ExecuteChildren, error) {
+	out := new(sliverpb.ExecuteChildren)
+	err := c.cc.Invoke(ctx, "/rpcpb.SliverRPC/ExecuteChildren", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2110,6 +2130,7 @@ type SliverRPCServer interface {
 	GetCertificateInfo(context.Context, *clientpb.CertificatesReq) (*clientpb.CertificateInfo, error)
 	GetCertificateAuthorityInfo(context.Context, *commonpb.Empty) (*clientpb.CertificateAuthorityInfo, error)
 	// *** Crackstation ***
+	Crack(context.Context, *clientpb.CrackCommand) (*clientpb.CrackResponse, error)
 	CrackstationRegister(*clientpb.Crackstation, SliverRPC_CrackstationRegisterServer) error
 	CrackstationTrigger(context.Context, *clientpb.Event) (*commonpb.Empty, error)
 	CrackstationBenchmark(context.Context, *clientpb.CrackBenchmark) (*commonpb.Empty, error)
@@ -2181,6 +2202,7 @@ type SliverRPCServer interface {
 	Migrate(context.Context, *clientpb.MigrateReq) (*sliverpb.Migrate, error)
 	Execute(context.Context, *sliverpb.ExecuteReq) (*sliverpb.Execute, error)
 	ExecuteWindows(context.Context, *sliverpb.ExecuteWindowsReq) (*sliverpb.Execute, error)
+	ExecuteChildren(context.Context, *sliverpb.ExecuteChildrenReq) (*sliverpb.ExecuteChildren, error)
 	Sideload(context.Context, *sliverpb.SideloadReq) (*sliverpb.Sideload, error)
 	SpawnDll(context.Context, *sliverpb.InvokeSpawnDllReq) (*sliverpb.SpawnDll, error)
 	Screenshot(context.Context, *sliverpb.ScreenshotReq) (*sliverpb.Screenshot, error)
@@ -2430,6 +2452,9 @@ func (UnimplementedSliverRPCServer) GetCertificateInfo(context.Context, *clientp
 func (UnimplementedSliverRPCServer) GetCertificateAuthorityInfo(context.Context, *commonpb.Empty) (*clientpb.CertificateAuthorityInfo, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetCertificateAuthorityInfo not implemented")
 }
+func (UnimplementedSliverRPCServer) Crack(context.Context, *clientpb.CrackCommand) (*clientpb.CrackResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Crack not implemented")
+}
 func (UnimplementedSliverRPCServer) CrackstationRegister(*clientpb.Crackstation, SliverRPC_CrackstationRegisterServer) error {
 	return status.Errorf(codes.Unimplemented, "method CrackstationRegister not implemented")
 }
@@ -2633,6 +2658,9 @@ func (UnimplementedSliverRPCServer) Execute(context.Context, *sliverpb.ExecuteRe
 }
 func (UnimplementedSliverRPCServer) ExecuteWindows(context.Context, *sliverpb.ExecuteWindowsReq) (*sliverpb.Execute, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ExecuteWindows not implemented")
+}
+func (UnimplementedSliverRPCServer) ExecuteChildren(context.Context, *sliverpb.ExecuteChildrenReq) (*sliverpb.ExecuteChildren, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ExecuteChildren not implemented")
 }
 func (UnimplementedSliverRPCServer) Sideload(context.Context, *sliverpb.SideloadReq) (*sliverpb.Sideload, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Sideload not implemented")
@@ -3888,6 +3916,24 @@ func _SliverRPC_GetCertificateAuthorityInfo_Handler(srv interface{}, ctx context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SliverRPC_Crack_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(clientpb.CrackCommand)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SliverRPCServer).Crack(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/rpcpb.SliverRPC/Crack",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SliverRPCServer).Crack(ctx, req.(*clientpb.CrackCommand))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SliverRPC_CrackstationRegister_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(clientpb.Crackstation)
 	if err := stream.RecvMsg(m); err != nil {
@@ -5111,6 +5157,24 @@ func _SliverRPC_ExecuteWindows_Handler(srv interface{}, ctx context.Context, dec
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(SliverRPCServer).ExecuteWindows(ctx, req.(*sliverpb.ExecuteWindowsReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SliverRPC_ExecuteChildren_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(sliverpb.ExecuteChildrenReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SliverRPCServer).ExecuteChildren(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/rpcpb.SliverRPC/ExecuteChildren",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SliverRPCServer).ExecuteChildren(ctx, req.(*sliverpb.ExecuteChildrenReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -6378,6 +6442,10 @@ var SliverRPC_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _SliverRPC_GetCertificateAuthorityInfo_Handler,
 		},
 		{
+			MethodName: "Crack",
+			Handler:    _SliverRPC_Crack_Handler,
+		},
+		{
 			MethodName: "CrackstationTrigger",
 			Handler:    _SliverRPC_CrackstationTrigger_Handler,
 		},
@@ -6644,6 +6712,10 @@ var SliverRPC_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ExecuteWindows",
 			Handler:    _SliverRPC_ExecuteWindows_Handler,
+		},
+		{
+			MethodName: "ExecuteChildren",
+			Handler:    _SliverRPC_ExecuteChildren_Handler,
 		},
 		{
 			MethodName: "Sideload",
