@@ -96,6 +96,7 @@ type SliverRPCClient interface {
 	Builders(ctx context.Context, in *commonpb.Empty, opts ...grpc.CallOption) (*clientpb.Builders, error)
 	// *** Certificates ***
 	GetCertificateInfo(ctx context.Context, in *clientpb.CertificatesReq, opts ...grpc.CallOption) (*clientpb.CertificateInfo, error)
+	GetCertificateAuthorityInfo(ctx context.Context, in *commonpb.Empty, opts ...grpc.CallOption) (*clientpb.CertificateAuthorityInfo, error)
 	// *** Crackstation ***
 	CrackstationRegister(ctx context.Context, in *clientpb.Crackstation, opts ...grpc.CallOption) (SliverRPC_CrackstationRegisterClient, error)
 	CrackstationTrigger(ctx context.Context, in *clientpb.Event, opts ...grpc.CallOption) (*commonpb.Empty, error)
@@ -221,6 +222,7 @@ type SliverRPCClient interface {
 	WGListSocksServers(ctx context.Context, in *sliverpb.WGSocksServersReq, opts ...grpc.CallOption) (*sliverpb.WGSocksServers, error)
 	// *** Realtime Commands ***
 	Shell(ctx context.Context, in *sliverpb.ShellReq, opts ...grpc.CallOption) (*sliverpb.Shell, error)
+	ShellResize(ctx context.Context, in *sliverpb.ShellResizeReq, opts ...grpc.CallOption) (*commonpb.Empty, error)
 	Portfwd(ctx context.Context, in *sliverpb.PortfwdReq, opts ...grpc.CallOption) (*sliverpb.Portfwd, error)
 	// *** Socks5 ***
 	CreateSocks(ctx context.Context, in *sliverpb.Socks, opts ...grpc.CallOption) (*sliverpb.Socks, error)
@@ -806,6 +808,15 @@ func (c *sliverRPCClient) Builders(ctx context.Context, in *commonpb.Empty, opts
 func (c *sliverRPCClient) GetCertificateInfo(ctx context.Context, in *clientpb.CertificatesReq, opts ...grpc.CallOption) (*clientpb.CertificateInfo, error) {
 	out := new(clientpb.CertificateInfo)
 	err := c.cc.Invoke(ctx, "/rpcpb.SliverRPC/GetCertificateInfo", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sliverRPCClient) GetCertificateAuthorityInfo(ctx context.Context, in *commonpb.Empty, opts ...grpc.CallOption) (*clientpb.CertificateAuthorityInfo, error) {
+	out := new(clientpb.CertificateAuthorityInfo)
+	err := c.cc.Invoke(ctx, "/rpcpb.SliverRPC/GetCertificateAuthorityInfo", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1870,6 +1881,15 @@ func (c *sliverRPCClient) Shell(ctx context.Context, in *sliverpb.ShellReq, opts
 	return out, nil
 }
 
+func (c *sliverRPCClient) ShellResize(ctx context.Context, in *sliverpb.ShellResizeReq, opts ...grpc.CallOption) (*commonpb.Empty, error) {
+	out := new(commonpb.Empty)
+	err := c.cc.Invoke(ctx, "/rpcpb.SliverRPC/ShellResize", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sliverRPCClient) Portfwd(ctx context.Context, in *sliverpb.PortfwdReq, opts ...grpc.CallOption) (*sliverpb.Portfwd, error) {
 	out := new(sliverpb.Portfwd)
 	err := c.cc.Invoke(ctx, "/rpcpb.SliverRPC/Portfwd", in, out, opts...)
@@ -2088,6 +2108,7 @@ type SliverRPCServer interface {
 	Builders(context.Context, *commonpb.Empty) (*clientpb.Builders, error)
 	// *** Certificates ***
 	GetCertificateInfo(context.Context, *clientpb.CertificatesReq) (*clientpb.CertificateInfo, error)
+	GetCertificateAuthorityInfo(context.Context, *commonpb.Empty) (*clientpb.CertificateAuthorityInfo, error)
 	// *** Crackstation ***
 	CrackstationRegister(*clientpb.Crackstation, SliverRPC_CrackstationRegisterServer) error
 	CrackstationTrigger(context.Context, *clientpb.Event) (*commonpb.Empty, error)
@@ -2213,6 +2234,7 @@ type SliverRPCServer interface {
 	WGListSocksServers(context.Context, *sliverpb.WGSocksServersReq) (*sliverpb.WGSocksServers, error)
 	// *** Realtime Commands ***
 	Shell(context.Context, *sliverpb.ShellReq) (*sliverpb.Shell, error)
+	ShellResize(context.Context, *sliverpb.ShellResizeReq) (*commonpb.Empty, error)
 	Portfwd(context.Context, *sliverpb.PortfwdReq) (*sliverpb.Portfwd, error)
 	// *** Socks5 ***
 	CreateSocks(context.Context, *sliverpb.Socks) (*sliverpb.Socks, error)
@@ -2404,6 +2426,9 @@ func (UnimplementedSliverRPCServer) Builders(context.Context, *commonpb.Empty) (
 }
 func (UnimplementedSliverRPCServer) GetCertificateInfo(context.Context, *clientpb.CertificatesReq) (*clientpb.CertificateInfo, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetCertificateInfo not implemented")
+}
+func (UnimplementedSliverRPCServer) GetCertificateAuthorityInfo(context.Context, *commonpb.Empty) (*clientpb.CertificateAuthorityInfo, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetCertificateAuthorityInfo not implemented")
 }
 func (UnimplementedSliverRPCServer) CrackstationRegister(*clientpb.Crackstation, SliverRPC_CrackstationRegisterServer) error {
 	return status.Errorf(codes.Unimplemented, "method CrackstationRegister not implemented")
@@ -2749,6 +2774,9 @@ func (UnimplementedSliverRPCServer) WGListSocksServers(context.Context, *sliverp
 }
 func (UnimplementedSliverRPCServer) Shell(context.Context, *sliverpb.ShellReq) (*sliverpb.Shell, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Shell not implemented")
+}
+func (UnimplementedSliverRPCServer) ShellResize(context.Context, *sliverpb.ShellResizeReq) (*commonpb.Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ShellResize not implemented")
 }
 func (UnimplementedSliverRPCServer) Portfwd(context.Context, *sliverpb.PortfwdReq) (*sliverpb.Portfwd, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Portfwd not implemented")
@@ -3838,6 +3866,24 @@ func _SliverRPC_GetCertificateInfo_Handler(srv interface{}, ctx context.Context,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(SliverRPCServer).GetCertificateInfo(ctx, req.(*clientpb.CertificatesReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SliverRPC_GetCertificateAuthorityInfo_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(commonpb.Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SliverRPCServer).GetCertificateAuthorityInfo(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/rpcpb.SliverRPC/GetCertificateAuthorityInfo",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SliverRPCServer).GetCertificateAuthorityInfo(ctx, req.(*commonpb.Empty))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -5915,6 +5961,24 @@ func _SliverRPC_Shell_Handler(srv interface{}, ctx context.Context, dec func(int
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SliverRPC_ShellResize_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(sliverpb.ShellResizeReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SliverRPCServer).ShellResize(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/rpcpb.SliverRPC/ShellResize",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SliverRPCServer).ShellResize(ctx, req.(*sliverpb.ShellResizeReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SliverRPC_Portfwd_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(sliverpb.PortfwdReq)
 	if err := dec(in); err != nil {
@@ -6308,6 +6372,10 @@ var SliverRPC_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetCertificateInfo",
 			Handler:    _SliverRPC_GetCertificateInfo_Handler,
+		},
+		{
+			MethodName: "GetCertificateAuthorityInfo",
+			Handler:    _SliverRPC_GetCertificateAuthorityInfo_Handler,
 		},
 		{
 			MethodName: "CrackstationTrigger",
@@ -6764,6 +6832,10 @@ var SliverRPC_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Shell",
 			Handler:    _SliverRPC_Shell_Handler,
+		},
+		{
+			MethodName: "ShellResize",
+			Handler:    _SliverRPC_ShellResize_Handler,
 		},
 		{
 			MethodName: "Portfwd",

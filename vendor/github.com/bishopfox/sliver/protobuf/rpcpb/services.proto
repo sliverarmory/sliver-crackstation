@@ -108,6 +108,8 @@ service SliverRPC {
 
   // *** Certificates ***
   rpc GetCertificateInfo(clientpb.CertificatesReq) returns (clientpb.CertificateInfo);
+  rpc GetCertificateAuthorityInfo(commonpb.Empty)
+      returns (clientpb.CertificateAuthorityInfo);
 
   // *** Crackstation ***
   rpc CrackstationRegister(clientpb.Crackstation)
@@ -273,6 +275,7 @@ service SliverRPC {
 
   // *** Realtime Commands ***
   rpc Shell(sliverpb.ShellReq) returns (sliverpb.Shell);
+  rpc ShellResize(sliverpb.ShellResizeReq) returns (commonpb.Empty);
   rpc Portfwd(sliverpb.PortfwdReq) returns (sliverpb.Portfwd);
 
   // *** Socks5 ***
