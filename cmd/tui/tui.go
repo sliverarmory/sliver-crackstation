@@ -416,7 +416,7 @@ func (m crackstationModel) renderHostLines() []string {
 	lines := []string{
 		formatLine("Name", emptyFallback(info.GetName(), "unknown")),
 		formatLine("Host UUID", info.GetHostUUID()),
-		formatLine("GOOS/GOARCH", fmt.Sprintf("%s/%s", info.GetGOOS(), info.GetGOARCH())),
+		formatLine("OS/Arch", fmt.Sprintf("%s/%s", info.GetGOOS(), info.GetGOARCH())),
 		formatLine("Hashcat Version", emptyFallback(info.GetHashcatVersion(), "unknown")),
 		formatLine("Servers", fmt.Sprintf("%d", countServers(m.crack))),
 	}
