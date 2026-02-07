@@ -19,6 +19,7 @@ package assets
 */
 
 import (
+	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -44,7 +45,7 @@ func GetAliasesDir() string {
 // GetInstalledAliasManifests - Returns a list of installed alias manifests
 func GetInstalledAliasManifests() []string {
 	aliasDir := GetAliasesDir()
-	aliasDirContent, err := os.ReadDir(aliasDir)
+	aliasDirContent, err := ioutil.ReadDir(aliasDir)
 	if err != nil {
 		log.Printf("error loading aliases: %s", err)
 		return []string{}

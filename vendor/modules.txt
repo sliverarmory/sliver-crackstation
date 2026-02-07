@@ -4,8 +4,8 @@ github.com/atotto/clipboard
 # github.com/aymanbagabas/go-osc52/v2 v2.0.1
 ## explicit; go 1.16
 github.com/aymanbagabas/go-osc52/v2
-# github.com/bishopfox/sliver v1.7.0
-## explicit; go 1.25.6
+# github.com/bishopfox/sliver v1.15.16
+## explicit; go 1.17
 github.com/bishopfox/sliver/client/assets
 github.com/bishopfox/sliver/client/constants
 github.com/bishopfox/sliver/client/transport
@@ -83,6 +83,8 @@ github.com/klauspost/compress/internal/le
 github.com/klauspost/compress/internal/snapref
 github.com/klauspost/compress/zstd
 github.com/klauspost/compress/zstd/internal/xxhash
+# github.com/kr/text v0.2.0
+## explicit
 # github.com/lucasb-eyer/go-colorful v1.2.0
 ## explicit; go 1.12
 github.com/lucasb-eyer/go-colorful
@@ -120,9 +122,6 @@ github.com/spf13/pflag
 # github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e
 ## explicit; go 1.19
 github.com/xo/terminfo
-# golang.org/x/mod v0.31.0
-## explicit; go 1.24.0
-golang.org/x/mod/semver
 # golang.org/x/net v0.48.0
 ## explicit; go 1.24.0
 golang.org/x/net/http/httpguts

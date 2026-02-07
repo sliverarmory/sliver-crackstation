@@ -23,9 +23,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"io/ioutil"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 )
 
@@ -50,7 +51,7 @@ func GetConfigDir() string {
 	rootDir, _ := filepath.Abs(GetRootAppDir())
 	dir := filepath.Join(rootDir, ConfigDirName)
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		err = os.MkdirAll(dir, 0o700)
+		err = os.MkdirAll(dir, 0700)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -61,7 +62,7 @@ func GetConfigDir() string {
 // GetConfigs - Returns a list of available configs
 func GetConfigs() map[string]*ClientConfig {
 	configDir := GetConfigDir()
-	configFiles, err := os.ReadDir(configDir)
+	configFiles, err := ioutil.ReadDir(configDir)
 	if err != nil {
 		log.Printf("No configs found %v", err)
 		return map[string]*ClientConfig{}
@@ -69,8 +70,8 @@ func GetConfigs() map[string]*ClientConfig {
 
 	confs := map[string]*ClientConfig{}
 	for _, confFile := range configFiles {
-		confFilePath := filepath.Join(configDir, confFile.Name())
-		// log.Printf("Parsing config %s", confFilePath)
+		confFilePath := path.Join(configDir, confFile.Name())
+		log.Printf("Parsing config %s", confFilePath)
 
 		conf, err := ReadConfig(confFilePath)
 		if err != nil {
@@ -90,7 +91,7 @@ func ReadConfig(confFilePath string) (*ClientConfig, error) {
 		return nil, err
 	}
 	defer confFile.Close()
-	data, err := io.ReadAll(confFile)
+	data, err := ioutil.ReadAll(confFile)
 	if err != nil {
 		log.Printf("Read failed %v", err)
 		return nil, err
@@ -113,7 +114,7 @@ func SaveConfig(config *ClientConfig) error {
 	filename := fmt.Sprintf("%s_%s.cfg", filepath.Base(config.Operator), filepath.Base(config.LHost))
 	saveTo, _ := filepath.Abs(filepath.Join(configDir, filename))
 	configJSON, _ := json.Marshal(config)
-	err := os.WriteFile(saveTo, configJSON, 0o600)
+	err := ioutil.WriteFile(saveTo, configJSON, 0600)
 	if err != nil {
 		log.Printf("Failed to write config to: %s (%v)", saveTo, err)
 		return err

@@ -20,6 +20,7 @@ package assets
 
 import (
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
 	"os/user"
@@ -34,19 +35,12 @@ const (
 	SliverClientDirName = ".sliver-client"
 
 	versionFileName = "version"
-	envVarName      = "SLIVER_CLIENT_ROOT_DIR"
 )
 
 // GetRootAppDir - Get the Sliver app dir ~/.sliver-client/
 func GetRootAppDir() string {
-	value := os.Getenv(envVarName)
-	var dir string
-	if len(value) == 0 {
-		user, _ := user.Current()
-		dir = filepath.Join(user.HomeDir, SliverClientDirName)
-	} else {
-		dir = value
-	}
+	user, _ := user.Current()
+	dir := filepath.Join(user.HomeDir, SliverClientDirName)
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		err = os.MkdirAll(dir, 0700)
 		if err != nil {
@@ -56,45 +50,9 @@ func GetRootAppDir() string {
 	return dir
 }
 
-// GetClientLogsDir - Get the Sliver client logs dir ~/.sliver-client/logs/
-func GetClientLogsDir() string {
-	logsDir := filepath.Join(GetRootAppDir(), "logs")
-	if _, err := os.Stat(logsDir); os.IsNotExist(err) {
-		err = os.MkdirAll(logsDir, 0700)
-		if err != nil {
-			log.Fatal(err)
-		}
-	}
-	return logsDir
-}
-
-// GetConsoleLogsDir - Get the Sliver client console logs dir ~/.sliver-client/logs/console/
-func GetConsoleLogsDir() string {
-	consoleLogsDir := filepath.Join(GetClientLogsDir(), "console")
-	if _, err := os.Stat(consoleLogsDir); os.IsNotExist(err) {
-		err = os.MkdirAll(consoleLogsDir, 0700)
-		if err != nil {
-			log.Fatal(err)
-		}
-	}
-	return consoleLogsDir
-}
-
-// GetMCPLogsDir - Get the Sliver client MCP logs dir ~/.sliver-client/logs/mcp/
-func GetMCPLogsDir() string {
-	mcpLogsDir := filepath.Join(GetClientLogsDir(), "mcp")
-	if _, err := os.Stat(mcpLogsDir); os.IsNotExist(err) {
-		err = os.MkdirAll(mcpLogsDir, 0700)
-		if err != nil {
-			log.Fatal(err)
-		}
-	}
-	return mcpLogsDir
-}
-
 func assetVersion() string {
 	appDir := GetRootAppDir()
-	data, err := os.ReadFile(filepath.Join(appDir, versionFileName))
+	data, err := ioutil.ReadFile(filepath.Join(appDir, versionFileName))
 	if err != nil {
 		return ""
 	}
@@ -115,7 +73,7 @@ func Setup(force bool, echo bool) {
 	if force || localVer == "" || localVer != ver.GitCommit {
 		if echo {
 			fmt.Printf(`
-Sliver  Copyright (C) 2026  Bishop Fox
+Sliver  Copyright (C) 2022  Bishop Fox
 This program comes with ABSOLUTELY NO WARRANTY; for details type 'licenses'.
 This is free software, and you are welcome to redistribute it
 under certain conditions; type 'licenses' for details.`)
@@ -123,5 +81,7 @@ under certain conditions; type 'licenses' for details.`)
 		}
 		saveAssetVersion(appDir)
 	}
-	_, _ = LoadSettings()
+	if _, err := os.Stat(filepath.Join(appDir, settingsFileName)); os.IsNotExist(err) {
+		SaveSettings(nil)
+	}
 }
