@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,6 +45,13 @@ import (
 )
 
 var HostUUID string
+
+// crackKeyspaceEvent is emitted by the server when it wants the crackstation to
+// calculate hashcat's `--keyspace` for a given CrackTask's CrackCommand.
+//
+// Note: This constant lives here (vs. upstream sliver constants) because the
+// server-side API is still evolving.
+const crackKeyspaceEvent = "crack-keyspace"
 
 func init() {
 	HostUUID = hostuuid.GetUUID()
@@ -319,7 +327,93 @@ func (c *Crackstation) handleEvent(server *SliverServer, event *clientpb.Event) 
 		if err != nil {
 			slog.Error("Error finalizing task", "err", err)
 		}
+
+	case crackKeyspaceEvent:
+		c.crackLock.Lock()
+		defer c.crackLock.Unlock()
+		task, err := server.fetchTask(event.Data)
+		if err != nil {
+			slog.Error("Error fetching task", "err", err)
+			return
+		}
+		slog.Info("Calculating keyspace", "task_id", task.ID)
+		c.currentCrackJobID = task.ID
+		defer func() { c.currentCrackJobID = "" }()
+		task.StartedAt = time.Now().Unix()
+		server.saveTask(task)
+
+		if task.Command == nil {
+			task.Err = "missing crack command"
+		} else {
+			cmdCopy := *task.Command
+			cmdCopy.Keyspace = true
+			cmdCopy.Quiet = true
+
+			// If the task depends on wordlists/rules/etc, we may need to sync
+			// those files before hashcat can compute keyspace.
+			keyspaceRaw, err := c.hashcat.Crack(&cmdCopy)
+			if err != nil {
+				slog.Info("Keyspace calculation failed; syncing crack files and retrying once", "task_id", task.ID, "err", err)
+				if syncErr := c.SyncFiles(server); syncErr != nil {
+					slog.Error("Keyspace sync failed", "task_id", task.ID, "err", syncErr)
+				}
+				keyspaceRaw, err = c.hashcat.Crack(&cmdCopy)
+			}
+
+			if err != nil {
+				slog.Error("Error calculating keyspace", "task_id", task.ID, "err", err)
+				task.Err = err.Error()
+			} else {
+				keyspaceStr, parseErr := parseHashcatKeyspace(keyspaceRaw)
+				if parseErr != nil {
+					slog.Error("Failed to parse hashcat keyspace", "task_id", task.ID, "err", parseErr)
+					task.Err = parseErr.Error()
+				} else {
+					slog.Info("Hashcat keyspace", "task_id", task.ID, "keyspace", keyspaceStr)
+					// TODO(server): Return keyspaceStr to the server once an RPC is defined/implemented.
+				}
+			}
+		}
+
+		task.CompletedAt = time.Now().Unix()
+		if err := server.saveTask(task); err != nil {
+			slog.Error("Error finalizing task", "err", err)
+		}
 	}
+}
+
+func parseHashcatKeyspace(stdout []byte) (string, error) {
+	// Hashcat `--keyspace` is expected to write the keyspace as a decimal integer
+	// to stdout.
+	out := strings.TrimSpace(string(stdout))
+	if out == "" {
+		return "", errors.New("hashcat returned empty keyspace output")
+	}
+
+	// Be robust to extra newlines; use the last non-empty line.
+	lines := strings.Split(out, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		// Validate decimal integer to avoid logging misleading output. Do not use
+		// strconv.ParseUint here because keyspace values can exceed uint64.
+		for _, r := range fields[0] {
+			if r < '0' || r > '9' {
+				return "", fmt.Errorf("unexpected keyspace output: %q", fields[0])
+			}
+		}
+		if fields[0] == "" {
+			return "", fmt.Errorf("unexpected keyspace output: %q", fields[0])
+		}
+		return fields[0], nil
+	}
+	return "", errors.New("hashcat returned keyspace output without a value")
 }
 
 func (c *Crackstation) AddServer(config *sliverClientAssets.ClientConfig) *SliverServer {
