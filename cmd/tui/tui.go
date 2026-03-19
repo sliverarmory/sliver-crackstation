@@ -9,11 +9,10 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/bishopfox/sliver/protobuf/clientpb"
-	"github.com/charmbracelet/bubbles/spinner"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/huh"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/sliverarmory/sliver-crackstation/pkg/crackstation"
 )
 
@@ -63,6 +62,22 @@ var (
 	tabBarStyle = lipgloss.NewStyle().Padding(0, 0, 0, 1)
 
 	boxStyle = lipgloss.NewStyle().BorderStyle(lipgloss.NormalBorder()).Padding(0, 1)
+
+	confirmBoxStyle = lipgloss.NewStyle().
+			BorderStyle(lipgloss.RoundedBorder()).
+			Padding(1, 2).
+			Width(34)
+	confirmTitleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230"))
+	confirmHintStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	confirmActiveStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("230")).
+				Background(lipgloss.Color("62")).
+				Padding(0, 1).
+				Bold(true)
+	confirmInactiveStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("245")).
+				Background(lipgloss.Color("236")).
+				Padding(0, 1)
 )
 
 type statusMsg *clientpb.CrackstationStatus
@@ -75,8 +90,7 @@ type crackstationModel struct {
 	spinner     spinner.Model
 	view        viewMode
 	confirming  bool
-	confirmForm *huh.Form
-	confirmQuit *bool
+	confirmQuit bool
 	benchmarks  map[int32]uint64
 	benchErr    error
 	devicePage  int
@@ -92,7 +106,7 @@ func StartTUI(crack *crackstation.Crackstation) {
 	statusSub := crack.StatusBroker.Subscribe()
 	defer crack.StatusBroker.Unsubscribe(statusSub)
 
-	p := tea.NewProgram(newModel(crack, statusSub), tea.WithAltScreen())
+	p := tea.NewProgram(newModel(crack, statusSub))
 	if _, err := p.Run(); err != nil {
 		slog.Error("TUI failed", "err", err)
 		os.Exit(1)
@@ -121,63 +135,58 @@ func newModel(crack *crackstation.Crackstation, statusSub chan *clientpb.Crackst
 	spin := spinner.New()
 	spin.Spinner = spinner.Line
 	spin.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("69"))
-	confirmQuit := false
 	var benchmarks map[int32]uint64
 	var benchErr error
 	if crack != nil {
 		benchmarks, benchErr = crack.LoadBenchmarkResults()
 	}
 	return crackstationModel{
-		crack:       crack,
-		status:      crack.Status(),
-		statusSub:   statusSub,
-		lastUpdate:  time.Now(),
-		spinner:     spin,
-		view:        viewSummary,
-		confirmQuit: &confirmQuit,
-		benchmarks:  benchmarks,
-		benchErr:    benchErr,
+		crack:      crack,
+		status:     crack.Status(),
+		statusSub:  statusSub,
+		lastUpdate: time.Now(),
+		spinner:    spin,
+		view:       viewSummary,
+		benchmarks: benchmarks,
+		benchErr:   benchErr,
 	}
 }
 
 func (m crackstationModel) Init() tea.Cmd {
-	return tea.Batch(m.spinner.Tick, waitForStatus(m.statusSub))
+	return tea.Batch(tea.Cmd(m.spinner.Tick), waitForStatus(m.statusSub))
 }
 
 func (m crackstationModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if m.confirming && m.confirmForm != nil {
-		var cmd tea.Cmd
-		model, cmd := m.confirmForm.Update(msg)
-		if updated, ok := model.(*huh.Form); ok {
-			m.confirmForm = updated
-		}
-		switch m.confirmForm.State {
-		case huh.StateCompleted:
-			if m.confirmQuit != nil && *m.confirmQuit {
-				return m, tea.Quit
-			}
-			m.confirming = false
-			m.confirmForm = nil
-			if m.confirmQuit != nil {
-				*m.confirmQuit = false
-			}
-		case huh.StateAborted:
-			m.confirming = false
-			m.confirmForm = nil
-			if m.confirmQuit != nil {
-				*m.confirmQuit = false
-			}
-		}
-		return m, cmd
-	}
-
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
+		if m.confirming {
+			switch msg.String() {
+			case "left", "h":
+				m.confirmQuit = true
+			case "right", "l":
+				m.confirmQuit = false
+			case "tab", "shift+tab", "space":
+				m.confirmQuit = !m.confirmQuit
+			case "y":
+				return m, tea.Quit
+			case "n", "esc":
+				m.confirming = false
+				m.confirmQuit = false
+			case "enter":
+				if m.confirmQuit {
+					return m, tea.Quit
+				}
+				m.confirming = false
+				m.confirmQuit = false
+			}
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "ctrl+c", "q":
 			m.confirming = true
-			m.confirmForm = newQuitConfirmForm(m.confirmQuit)
-			return m, m.confirmForm.Init()
+			m.confirmQuit = false
+			return m, nil
 		case "tab":
 			m.view = (m.view + 1) % 4
 		case "left":
@@ -222,18 +231,47 @@ func (m crackstationModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m crackstationModel) View() string {
-	if m.confirming && m.confirmForm != nil {
-		header := m.renderHeader()
-		body := m.confirmForm.View()
-		footer := helpStyle.Render("enter: submit  esc: cancel")
-		return strings.Join([]string{header, body, footer}, "\n\n")
+func (m crackstationModel) View() tea.View {
+	content := m.renderMainView()
+	if m.confirming {
+		content = m.renderConfirmView()
 	}
+	view := tea.NewView(content)
+	view.AltScreen = true
+	return view
+}
 
+func (m crackstationModel) renderMainView() string {
 	header := m.renderHeader()
 	body := m.renderBody()
 	footer := helpStyle.Render(m.footerText())
 	return strings.Join([]string{header, body, footer}, "\n\n")
+}
+
+func (m crackstationModel) renderConfirmView() string {
+	buttonStyle := confirmInactiveStyle
+	if m.confirmQuit {
+		buttonStyle = confirmActiveStyle
+	}
+	noStyle := confirmInactiveStyle
+	if !m.confirmQuit {
+		noStyle = confirmActiveStyle
+	}
+
+	body := confirmBoxStyle.Render(strings.Join([]string{
+		confirmTitleStyle.Render("Quit crackstation?"),
+		"",
+		"Use \u2190/\u2192 or tab to choose.",
+		"",
+		lipgloss.JoinHorizontal(lipgloss.Left, buttonStyle.Render("Yes"), " ", noStyle.Render("No")),
+		"",
+		confirmHintStyle.Render("enter: confirm  esc: cancel"),
+	}, "\n"))
+
+	if m.width > 0 && m.height > 0 {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, body)
+	}
+	return body
 }
 
 func (m crackstationModel) renderHeader() string {
@@ -598,18 +636,6 @@ func (m crackstationModel) renderGRPCStatus() string {
 		return strings.Join([]string{label, grpcConnectingStyle.Render(fmt.Sprintf("reconnecting in %s (%d)", humanizeDuration(next), pending))}, " ")
 	}
 	return strings.Join([]string{label, grpcDisconnectedStyle.Render(fmt.Sprintf("disconnected (%d)", total))}, " ")
-}
-
-func newQuitConfirmForm(value *bool) *huh.Form {
-	return huh.NewForm(
-		huh.NewGroup(
-			huh.NewConfirm().
-				Title("Quit crackstation?").
-				Affirmative("Yes").
-				Negative("No").
-				Value(value),
-		),
-	)
 }
 
 func countServers(crack *crackstation.Crackstation) int {
