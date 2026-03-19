@@ -11,13 +11,12 @@ import (
 	"time"
 	"unsafe"
 
-	consts "github.com/bishopfox/sliver/client/constants"
 	"github.com/bishopfox/sliver/protobuf/clientpb"
 	"github.com/bishopfox/sliver/protobuf/commonpb"
 	"github.com/bishopfox/sliver/protobuf/rpcpb"
 	"github.com/gofrs/uuid"
-	sliverClientAssets "github.com/bishopfox/sliver/client/assets"
 	"github.com/sliverarmory/sliver-crackstation/pkg/hashcat"
+	"github.com/sliverarmory/sliver-crackstation/pkg/operatorconfig"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -37,7 +36,7 @@ func TestHandleEventBenchmarkUploadsResults(t *testing.T) {
 
 	mock := &mockSliverRPC{
 		CrackstationRegisterFunc: func(_ *clientpb.Crackstation, stream rpcpb.SliverRPC_CrackstationRegisterServer) error {
-			event := &clientpb.Event{EventType: consts.CrackBenchmark, Data: taskID.Bytes()}
+			event := &clientpb.Event{EventType: crackBenchmarkEvent, Data: taskID.Bytes()}
 			if err := stream.Send(event); err != nil {
 				return status.Errorf(codes.Internal, "failed to send event: %v", err)
 			}
@@ -69,7 +68,7 @@ func TestHandleEventBenchmarkUploadsResults(t *testing.T) {
 	server := &SliverServer{
 		Crackstation: station,
 		rpc:          client,
-		Config:       &sliverClientAssets.ClientConfig{Operator: "bench-op"},
+		Config:       &operatorconfig.ClientConfig{Operator: "bench-op"},
 	}
 
 	benchmarks := map[int32]uint64{1000: 4242}
@@ -98,10 +97,10 @@ func TestHandleEventBenchmarkUploadsResults(t *testing.T) {
 	}()
 
 	var (
-		got          *clientpb.CrackBenchmark
-		finalUpdate  *clientpb.CrackTask
-		updateCount  int
-		deadline     = time.After(3 * time.Second)
+		got           *clientpb.CrackBenchmark
+		finalUpdate   *clientpb.CrackTask
+		updateCount   int
+		deadline      = time.After(3 * time.Second)
 		receivedBench bool
 	)
 	for !(receivedBench && finalUpdate != nil) {

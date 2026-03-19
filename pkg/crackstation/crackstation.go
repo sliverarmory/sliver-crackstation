@@ -32,14 +32,13 @@ import (
 	"sync"
 	"time"
 
-	sliverClientAssets "github.com/bishopfox/sliver/client/assets"
-	consts "github.com/bishopfox/sliver/client/constants"
-	"github.com/bishopfox/sliver/client/transport"
-	"github.com/bishopfox/sliver/implant/sliver/hostuuid"
 	"github.com/bishopfox/sliver/protobuf/clientpb"
 	"github.com/bishopfox/sliver/protobuf/rpcpb"
 	"github.com/gofrs/uuid"
 	"github.com/sliverarmory/sliver-crackstation/pkg/hashcat"
+	"github.com/sliverarmory/sliver-crackstation/pkg/hostuuid"
+	"github.com/sliverarmory/sliver-crackstation/pkg/operatorconfig"
+	"github.com/sliverarmory/sliver-crackstation/pkg/transport"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 )
@@ -52,6 +51,11 @@ var HostUUID string
 // Note: This constant lives here (vs. upstream sliver constants) because the
 // server-side API is still evolving.
 const crackKeyspaceEvent = "crack-keyspace"
+
+const (
+	crackEvent          = "crack"
+	crackBenchmarkEvent = "crack-benchmark"
+)
 
 func init() {
 	HostUUID = hostuuid.GetUUID()
@@ -263,7 +267,7 @@ func (c *Crackstation) handleEvent(server *SliverServer, event *clientpb.Event) 
 	slog.Info("Crackstation event", "type", event.EventType)
 	switch event.EventType {
 
-	case consts.CrackStr:
+	case crackEvent:
 		c.crackLock.Lock()
 		defer c.crackLock.Unlock()
 		task, err := server.fetchTask(event.Data)
@@ -287,7 +291,7 @@ func (c *Crackstation) handleEvent(server *SliverServer, event *clientpb.Event) 
 			slog.Error("Error finalizing task", "err", err)
 		}
 
-	case consts.CrackBenchmark:
+	case crackBenchmarkEvent:
 		c.crackLock.Lock()
 		defer c.crackLock.Unlock()
 		var err error
@@ -416,7 +420,7 @@ func parseHashcatKeyspace(stdout []byte) (string, error) {
 	return "", errors.New("hashcat returned keyspace output without a value")
 }
 
-func (c *Crackstation) AddServer(config *sliverClientAssets.ClientConfig) *SliverServer {
+func (c *Crackstation) AddServer(config *operatorconfig.ClientConfig) *SliverServer {
 	server, _ := c.Servers.LoadOrStore(config.Token, &SliverServer{
 		Config:       config,
 		State:        DISCONNECTED,
@@ -442,7 +446,7 @@ const defaultReconnectInterval = 30 * time.Second
 type SliverServer struct {
 	Crackstation *Crackstation
 	rpc          rpcpb.SliverRPCClient
-	Config       *sliverClientAssets.ClientConfig
+	Config       *operatorconfig.ClientConfig
 	State        string
 	ln           *grpc.ClientConn
 
@@ -554,7 +558,7 @@ func (s *SliverServer) refreshState(now time.Time) {
 	case connectivity.TransientFailure, connectivity.Shutdown:
 		s.State = DISCONNECTED
 		s.scheduleReconnectAt(now)
-		_ = s.ln.Close()
+		_ = transport.CloseConnection(s.ln)
 	}
 }
 
@@ -573,7 +577,7 @@ func (s *SliverServer) watchConn(ctx context.Context, cancel context.CancelFunc)
 			s.State = DISCONNECTED
 			s.scheduleReconnect()
 			cancel()
-			_ = s.ln.Close()
+			_ = transport.CloseConnection(s.ln)
 			return
 		}
 		if !s.ln.WaitForStateChange(ctx, state) {
@@ -583,7 +587,7 @@ func (s *SliverServer) watchConn(ctx context.Context, cancel context.CancelFunc)
 }
 
 func (s *SliverServer) Close() error {
-	return s.ln.Close()
+	return transport.CloseConnection(s.ln)
 }
 
 func (s *SliverServer) fetchTask(taskID []byte) (*clientpb.CrackTask, error) {

@@ -11,6 +11,7 @@ import (
 	"github.com/bishopfox/sliver/protobuf/rpcpb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/test/bufconn"
 )
 
 type fakeRPC struct {
@@ -59,10 +60,7 @@ func TestUploadBenchmarkResult(t *testing.T) {
 }
 
 func TestWatchConnCancelsOnClose(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to listen: %v", err)
-	}
+	listener := bufconn.Listen(testBufConnSize)
 	server := grpc.NewServer()
 	go func() {
 		_ = server.Serve(listener)
@@ -74,9 +72,13 @@ func TestWatchConnCancelsOnClose(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
+	dialer := func(context.Context, string) (net.Conn, error) {
+		return listener.Dial()
+	}
 	conn, err := grpc.DialContext(
 		ctx,
-		listener.Addr().String(),
+		"bufnet",
+		grpc.WithContextDialer(dialer),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 	if err != nil {

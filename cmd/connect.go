@@ -27,12 +27,12 @@ import (
 	"runtime"
 	"time"
 
-	sliverClientAssets "github.com/bishopfox/sliver/client/assets"
-	"github.com/bishopfox/sliver/client/transport"
 	"github.com/sliverarmory/sliver-crackstation/assets"
 	"github.com/sliverarmory/sliver-crackstation/cmd/tui"
 	"github.com/sliverarmory/sliver-crackstation/pkg/crackstation"
 	"github.com/sliverarmory/sliver-crackstation/pkg/hashcat"
+	"github.com/sliverarmory/sliver-crackstation/pkg/operatorconfig"
+	"github.com/sliverarmory/sliver-crackstation/pkg/transport"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"golang.org/x/term"
@@ -192,11 +192,11 @@ func runConnectWithOptions(options connectOptions) error {
 		PermitWithoutStream: options.KeepalivePermitWithoutStream,
 	})
 
-	config, err := sliverClientAssets.ReadConfig(options.OperatorConfig)
+	config, err := operatorconfig.ReadConfig(options.OperatorConfig)
 	if err != nil {
 		return fmt.Errorf("failed to read config: %w", err)
 	}
-	configs := []sliverClientAssets.ClientConfig{*config}
+	configs := []operatorconfig.ClientConfig{*config}
 
 	name := options.Name
 	if name == "" {

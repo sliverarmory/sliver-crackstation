@@ -9,11 +9,16 @@ require (
 	github.com/charmbracelet/huh v0.8.0
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/gofrs/uuid v4.4.0+incompatible
+	github.com/google/btree v1.1.3
 	github.com/klauspost/compress v1.18.1
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
+	golang.zx2c4.com/wireguard v0.0.0-20250521234502-f333402bd9cb
 	golang.org/x/term v0.38.0
+	golang.org/x/crypto v0.49.0
+	golang.org/x/time v0.14.0
 	google.golang.org/grpc v1.78.0
+	gvisor.dev/gvisor v0.0.0-20250503011706-39ed1f5ac29c
 	gopkg.in/yaml.v3 v3.0.1
 )
 

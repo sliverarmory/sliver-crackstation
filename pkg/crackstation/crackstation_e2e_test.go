@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	consts "github.com/bishopfox/sliver/client/constants"
 	"github.com/bishopfox/sliver/protobuf/clientpb"
 	"github.com/bishopfox/sliver/protobuf/commonpb"
 	"github.com/bishopfox/sliver/protobuf/rpcpb"
@@ -77,7 +76,7 @@ func TestCrackstationCrackTaskE2E(t *testing.T) {
 
 	mock := &mockSliverRPC{
 		CrackstationRegisterFunc: func(_ *clientpb.Crackstation, stream rpcpb.SliverRPC_CrackstationRegisterServer) error {
-			event := &clientpb.Event{EventType: consts.CrackStr, Data: taskID.Bytes()}
+			event := &clientpb.Event{EventType: crackEvent, Data: taskID.Bytes()}
 			if err := stream.Send(event); err != nil {
 				return status.Errorf(codes.Internal, "failed to send event: %v", err)
 			}
