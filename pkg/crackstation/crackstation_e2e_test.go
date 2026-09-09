@@ -18,6 +18,7 @@ import (
 	"github.com/gofrs/uuid"
 	"github.com/sliverarmory/sliver-crackstation/assets"
 	"github.com/sliverarmory/sliver-crackstation/pkg/hashcat"
+	"github.com/sliverarmory/sliver-crackstation/pkg/operatorconfig"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -96,7 +97,11 @@ func TestCrackstationCrackTaskE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create crackstation: %v", err)
 	}
-	server := &SliverServer{Crackstation: station, rpc: client}
+	server := &SliverServer{
+		Config:       &operatorconfig.ClientConfig{Operator: "e2e"},
+		Crackstation: station,
+		rpc:          client,
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

@@ -1,3 +1,3 @@
 package hashcat
 
-const hashcatExe = "hashcat"
+const hashcatExe = "hashcat.bin"

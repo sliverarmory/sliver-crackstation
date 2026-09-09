@@ -34,10 +34,6 @@ GO_VERSION_VALIDATION_ERR_MSG = Golang version is not supported, please update t
 default: clean
 	$(ENV) $(GO) build -mod=vendor -trimpath $(TAGS) $(LDFLAGS) -o sliver-crackstation$(ARTIFACT_SUFFIX) .
 
-.PHONY: macos-amd64
-macos: clean validate-go-version
-	GOOS=darwin GOARCH=amd64 $(ENV) $(GO) build -mod=vendor -trimpath $(TAGS) $(LDFLAGS) -o sliver-crackstation$(ARTIFACT_SUFFIX) .
-
 .PHONY: macos-arm64
 macos-arm64: clean validate-go-version
 	GOOS=darwin GOARCH=arm64 $(ENV) $(GO) build -mod=vendor -trimpath $(TAGS) $(LDFLAGS) -o sliver-crackstation$(ARTIFACT_SUFFIX) .
@@ -63,7 +59,6 @@ validate-go-version:
 
 
 clean-all: clean
-	rm -f ./assets/darwin/amd64/*.zip
 	rm -f ./assets/darwin/arm64/*.zip
 	rm -f ./assets/linux/amd64/*.zip
 	rm -f ./assets/windows/amd64/*.zip

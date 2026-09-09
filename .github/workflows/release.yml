@@ -34,6 +34,7 @@ jobs:
       - name: Build binaries
         run: |
           mkdir -p dist
+          make assets
           GOOS=windows GOARCH=amd64 go build -trimpath -mod=vendor -o dist/sliver-crackstation_windows-amd64.exe ./
           GOOS=linux GOARCH=amd64 go build -trimpath -mod=vendor -o dist/sliver-crackstation_linux-amd64 ./
           GOOS=darwin GOARCH=arm64 go build -trimpath -mod=vendor -o dist/sliver-crackstation_darwin-arm64 ./

@@ -120,7 +120,9 @@ func (h *Hashcat) parseUserTaskArgs(cmd *clientpb.CrackCommand) ([]string, []str
 		args = append(args, fmt.Sprintf("--session=%s", cmd.Session))
 	}
 	if cmd.Restore {
-		args = append(args, "--restore")
+		// Hashcat 7's --restore only prints the saved command. Resume safely with
+		// the arguments rebuilt from this CrackCommand instead.
+		args = append(args, "--restore-position")
 	}
 	if cmd.RestoreDisable {
 		args = append(args, "--restore-disable")
@@ -133,7 +135,7 @@ func (h *Hashcat) parseUserTaskArgs(cmd *clientpb.CrackCommand) ([]string, []str
 		tmp.Write(cmd.RestoreFile)
 		tmp.Close()
 		cleanup = append(cleanup, tmp.Name())
-		args = append(args, fmt.Sprintf("--restore-file=%s", tmp.Name()))
+		args = append(args, fmt.Sprintf("--restore-file-path=%s", tmp.Name()))
 	}
 	if len(cmd.OutfileFormat) != 0 {
 		formats := []string{}
@@ -233,7 +235,7 @@ func (h *Hashcat) parseUserTaskArgs(cmd *clientpb.CrackCommand) ([]string, []str
 		args = append(args, "--speed-only")
 	}
 	if cmd.SegmentSize != 0 {
-		args = append(args, fmt.Sprintf("--segment-size=%d", cmd.SegmentSize))
+		return nil, cleanup, fmt.Errorf("hashcat v7 does not support --segment-size")
 	}
 	if cmd.BitmapMin != 0 {
 		args = append(args, fmt.Sprintf("--bitmap-min=%d", cmd.BitmapMin))
@@ -287,7 +289,7 @@ func (h *Hashcat) parseUserTaskArgs(cmd *clientpb.CrackCommand) ([]string, []str
 		args = append(args, "--optimized-kernel-enable")
 	}
 	if cmd.MultiplyAccelDisabled {
-		args = append(args, "--multiply-accel-disabled")
+		args = append(args, "--multiply-accel-disable")
 	}
 	if cmd.WorkloadProfile != clientpb.CrackWorkloadProfile_INVALID_WORKLOAD_PROFILE {
 		args = append(args, fmt.Sprintf("--workload-profile=%d", cmd.WorkloadProfile))
@@ -354,7 +356,7 @@ func (h *Hashcat) parseUserTaskArgs(cmd *clientpb.CrackCommand) ([]string, []str
 		tmp.Write(cmd.RulesFile)
 		tmp.Close()
 		cleanup = append(cleanup, tmp.Name())
-		args = append(args, fmt.Sprintf("--rules=%s", tmp.Name()))
+		args = append(args, fmt.Sprintf("--rules-file=%s", tmp.Name()))
 	}
 	// rules
 	if len(cmd.Hashes) != 0 {

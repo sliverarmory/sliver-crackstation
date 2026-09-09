@@ -9,10 +9,10 @@
 
 ## Build, Test, and Development Commands
 - `make` (default target) builds the `sliver-crackstation` binary using vendored deps.
-- `make macos`, `make macos-arm64`, `make linux`, `make windows` produce OS-specific binaries.
+- `make macos-arm64`, `make linux`, `make windows` produce OS-specific binaries.
 - `make clean` removes local build artifacts; `make clean-all` also removes packaged assets.
 - `make assets` runs the Go asset downloader to fetch hashcat archives into `assets/` (requires network access).
-- `go test ./...` can be used for a quick compile/test pass even though no tests exist yet.
+- After fetching assets, `go test ./...` runs the unit and integration test suite.
 
 ## Coding Style & Naming Conventions
 - Use standard Go formatting (`gofmt`/`goimports`); keep packages lowercase and file names descriptive.
@@ -20,7 +20,6 @@
 - Keep exported types and functions in `PascalCase`, unexported in `camelCase`.
 
 ## Testing Guidelines
-- There are currently no `*_test.go` files in the repo.
 - New tests should live next to the package they cover and use standard Go naming (`foo_test.go`, `TestXxx`).
 - No explicit coverage targets are defined; include tests for new behavior when feasible.
 

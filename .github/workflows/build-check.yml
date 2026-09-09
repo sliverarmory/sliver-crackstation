@@ -8,7 +8,7 @@ on:
       - "**.sum"
       - "**.yml"
       - "Makefile"
-      - "go-assets.sh"
+      - "util/assets/**"
 
   pull_request:
     branches: main
@@ -18,7 +18,7 @@ on:
       - "**.sum"
       - "**.yml"
       - "Makefile"
-      - "go-assets.sh"
+      - "util/assets/**"
 
 jobs:
   build-linux-windows:
@@ -40,6 +40,8 @@ jobs:
       - name: Make
         working-directory: .
         run: |
+          make assets
+          go test -mod=vendor ./...
           make linux
           make windows
 
@@ -62,5 +64,5 @@ jobs:
       - name: Make
         working-directory: .
         run: |
-          make macos-amd64
+          make assets
           make macos-arm64

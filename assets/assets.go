@@ -162,7 +162,9 @@ func unpackHashcat(appDir string) error {
 		return err
 	}
 	if runtime.GOOS != "windows" {
-		os.Chmod(filepath.Join(hashcatDir, "hashcat"), 0755)
+		if err := os.Chmod(filepath.Join(hashcatDir, hashcatExe), 0755); err != nil {
+			return fmt.Errorf("make hashcat executable: %w", err)
+		}
 	}
 	return nil
 }
