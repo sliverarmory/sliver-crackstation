@@ -2,11 +2,12 @@ package crackstation
 
 import (
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unsafe"
@@ -14,9 +15,9 @@ import (
 	"github.com/bishopfox/sliver/protobuf/clientpb"
 	"github.com/bishopfox/sliver/protobuf/commonpb"
 	"github.com/bishopfox/sliver/protobuf/rpcpb"
-	"github.com/gofrs/uuid"
 	"github.com/sliverarmory/sliver-crackstation/pkg/hashcat"
 	"github.com/sliverarmory/sliver-crackstation/pkg/operatorconfig"
+	"github.com/sliverarmory/sliver-crackstation/pkg/protocompat"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -28,29 +29,15 @@ func TestHandleEventBenchmarkUploadsResults(t *testing.T) {
 		HostUUID = originalHostUUID
 	})
 
-	taskID := uuid.Must(uuid.NewV4())
-	task := &clientpb.CrackTask{ID: taskID.String()}
-
-	updateCh := make(chan *clientpb.CrackTask, 4)
 	benchmarkCh := make(chan *clientpb.CrackBenchmark, 1)
 
 	mock := &mockSliverRPC{
 		CrackstationRegisterFunc: func(_ *clientpb.Crackstation, stream rpcpb.SliverRPC_CrackstationRegisterServer) error {
-			event := &clientpb.Event{EventType: crackBenchmarkEvent, Data: taskID.Bytes()}
+			event := &clientpb.Event{EventType: crackBenchmarkEvent}
 			if err := stream.Send(event); err != nil {
 				return status.Errorf(codes.Internal, "failed to send event: %v", err)
 			}
 			return nil
-		},
-		CrackTaskByIDFunc: func(_ context.Context, req *clientpb.CrackTask) (*clientpb.CrackTask, error) {
-			if req.ID != taskID.String() {
-				return nil, status.Errorf(codes.InvalidArgument, "unexpected task id: %s", req.ID)
-			}
-			return task, nil
-		},
-		CrackTaskUpdateFunc: func(_ context.Context, update *clientpb.CrackTask) (*commonpb.Empty, error) {
-			updateCh <- update
-			return &commonpb.Empty{}, nil
 		},
 		CrackstationBenchmarkFunc: func(_ context.Context, req *clientpb.CrackBenchmark) (*commonpb.Empty, error) {
 			benchmarkCh <- req
@@ -71,15 +58,6 @@ func TestHandleEventBenchmarkUploadsResults(t *testing.T) {
 		Config:       &operatorconfig.ClientConfig{Operator: "bench-op"},
 	}
 
-	benchmarks := map[int32]uint64{1000: 4242}
-	benchmarkData, err := json.Marshal(benchmarks)
-	if err != nil {
-		t.Fatalf("failed to marshal benchmark data: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(station.dataDir, "benchmark.json"), benchmarkData, 0600); err != nil {
-		t.Fatalf("failed to write benchmark.json: %v", err)
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	events, err := server.Events(ctx)
@@ -96,26 +74,11 @@ func TestHandleEventBenchmarkUploadsResults(t *testing.T) {
 		}
 	}()
 
-	var (
-		got           *clientpb.CrackBenchmark
-		finalUpdate   *clientpb.CrackTask
-		updateCount   int
-		deadline      = time.After(3 * time.Second)
-		receivedBench bool
-	)
-	for !(receivedBench && finalUpdate != nil) {
-		select {
-		case update := <-updateCh:
-			updateCount++
-			if update.CompletedAt != 0 {
-				finalUpdate = update
-			}
-		case bench := <-benchmarkCh:
-			got = bench
-			receivedBench = true
-		case <-deadline:
-			t.Fatal("timeout waiting for benchmark and task updates")
-		}
+	var got *clientpb.CrackBenchmark
+	select {
+	case got = <-benchmarkCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for fresh benchmark upload")
 	}
 	wg.Wait()
 
@@ -131,28 +94,292 @@ func TestHandleEventBenchmarkUploadsResults(t *testing.T) {
 	if got.Benchmarks[1000] != 4242 {
 		t.Fatalf("expected benchmark for mode 1000 to be 4242, got %d", got.Benchmarks[1000])
 	}
-	if updateCount != 2 {
-		t.Fatalf("expected 2 task updates, got %d", updateCount)
+	fields, err := protocompat.NewReader(got)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if finalUpdate == nil || finalUpdate.CompletedAt == 0 {
-		t.Fatal("expected final task update to include CompletedAt")
+	schemaVersion, err := fields.Uint32(crackBenchmarkSchemaVersionField)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if finalUpdate.Err != "" {
-		t.Fatalf("expected no task error, got %q", finalUpdate.Err)
+	hashcatVersion, err := fields.String(crackBenchmarkHashcatVersionField)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if schemaVersion != benchmarkSchemaVersion || hashcatVersion != "test" {
+		t.Fatalf("benchmark protocol marker = schema %d, Hashcat %q", schemaVersion, hashcatVersion)
+	}
+}
+
+func TestUnknownHashcatVersionIsConsistentAcrossRegistrationAndBenchmark(t *testing.T) {
+	station := &Crackstation{hashcat: &hashcat.Hashcat{}}
+	registration := station.ToProtobuf()
+	if registration.GetHashcatVersion() != "unknown" {
+		t.Fatalf("registration Hashcat version = %q; want stable unknown marker", registration.GetHashcatVersion())
+	}
+	message, err := (&SliverServer{Crackstation: station}).benchmarkMessage("worker", map[int32]uint64{0: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields, err := protocompat.NewReader(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, err := fields.String(crackBenchmarkHashcatVersionField)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != registration.GetHashcatVersion() {
+		t.Fatalf("benchmark Hashcat version = %q; registration reported %q", version, registration.GetHashcatVersion())
 	}
 }
 
 func newTestHashcat(t *testing.T) *hashcat.Hashcat {
 	t.Helper()
+	return newTestHashcatWithScript(t, "#!/bin/sh\nprintf '%s\\n' '* Hash-Mode 1000 (NTLM)' 'Speed.#1.........: 4242 H/s'\n")
+}
+
+func newTestHashcatWithScript(t *testing.T, script string) *hashcat.Hashcat {
+	t.Helper()
+	directory := t.TempDir()
+	executable := filepath.Join(directory, "hashcat-test")
+	if err := os.WriteFile(executable, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
 	h := &hashcat.Hashcat{}
-	field := reflect.ValueOf(h).Elem().FieldByName("version")
-	if !field.IsValid() {
-		t.Fatal("hashcat.Hashcat missing version field")
+	for name, value := range map[string]string{"version": "test", "exe": executable, "cwd": directory} {
+		field := reflect.ValueOf(h).Elem().FieldByName(name)
+		if !field.IsValid() {
+			t.Fatalf("hashcat.Hashcat missing %s field", name)
+		}
+		reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().SetString(value)
 	}
-	if !field.CanSet() {
-		reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().SetString("test")
-		return h
-	}
-	field.SetString("test")
 	return h
+}
+
+func TestBenchmarkRunsAllHashModesWithoutExplicitModes(t *testing.T) {
+	argsPath := filepath.Join(t.TempDir(), "hashcat-args")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" + argsPath + "'\n" +
+		"printf '%s\\n' '* Hash-Mode 1000 (NTLM)' 'Speed.#1.........: 4242 H/s'\n"
+	station := &Crackstation{
+		dataDir: t.TempDir(),
+		hashcat: newTestHashcatWithScript(t, script),
+	}
+
+	if err := station.Benchmark(); err != nil {
+		t.Fatalf("Benchmark() error = %v", err)
+	}
+	data, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Fields(string(data))
+	foundBenchmark := false
+	foundBenchmarkAll := false
+	foundLogfileDisable := false
+	for _, arg := range args {
+		if arg == "--benchmark" {
+			foundBenchmark = true
+		}
+		if arg == "--benchmark-all" {
+			foundBenchmarkAll = true
+		}
+		if arg == "--logfile-disable" {
+			foundLogfileDisable = true
+		}
+		if strings.HasPrefix(arg, "--attack-mode=") || strings.HasPrefix(arg, "--hash-type=") {
+			t.Fatalf("benchmark argv contains unintended mode %q: %q", arg, args)
+		}
+	}
+	if !foundBenchmark {
+		t.Fatalf("benchmark argv missing --benchmark: %q", args)
+	}
+	if !foundBenchmarkAll {
+		t.Fatalf("benchmark argv missing --benchmark-all: %q", args)
+	}
+	if !foundLogfileDisable {
+		t.Fatalf("benchmark argv missing --logfile-disable: %q", args)
+	}
+}
+
+func TestRequestedBenchmarkRetriesFreshFailure(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "attempted")
+	h := newScriptHashcat(t, `
+if [ ! -f '`+marker+`' ]; then
+  : > '`+marker+`'
+  exit 2
+fi
+printf '%s\n' '* Hash-Mode 1000 (NTLM)' 'Speed.#1.........: 77 H/s'
+`)
+	var uploads atomic.Int32
+	mock := &mockSliverRPC{CrackstationBenchmarkFunc: func(context.Context, *clientpb.CrackBenchmark) (*commonpb.Empty, error) {
+		uploads.Add(1)
+		return &commonpb.Empty{}, nil
+	}}
+	station, err := NewCrackstation("worker", t.TempDir(), h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	station.runBenchmarkRequest(&SliverServer{Crackstation: station, rpc: newBufConnClient(t, mock)})
+	if uploads.Load() != 1 {
+		t.Fatalf("benchmark uploads = %d; want one after retry succeeds", uploads.Load())
+	}
+	results, err := station.LoadBenchmarkResults()
+	if err != nil || results[1000] != 77 {
+		t.Fatalf("benchmark results = %v, %v", results, err)
+	}
+}
+
+func TestRequestedBenchmarkUploadsModesRecoveredAfterBridgeAbort(t *testing.T) {
+	h := newScriptHashcat(t, `
+mkdir -p modules
+: > modules/module_01000.so
+: > modules/module_72000.so
+: > modules/module_74000.so
+mode=all
+for arg in "$@"; do
+  case "$arg" in
+    --hash-type=*) mode=${arg#--hash-type=} ;;
+  esac
+done
+case "$mode" in
+  all)
+    printf '%s\n' '* Hash-Mode 1000 (NTLM)' 'Speed.#1.........: 42 H/s' '' '* Hash-Mode 72000 (Python bridge)'
+    exit 255
+    ;;
+  72000)
+    printf '%s\n' 'Unable to find suitable Python library for -m 72000.' >&2
+    exit 255
+    ;;
+  74000)
+    printf '%s\n' '* Hash-Mode 74000 (Rust bridge)' 'Speed.#1.........: 74 H/s'
+    ;;
+esac
+`)
+	var uploaded *clientpb.CrackBenchmark
+	mock := &mockSliverRPC{CrackstationBenchmarkFunc: func(_ context.Context, benchmark *clientpb.CrackBenchmark) (*commonpb.Empty, error) {
+		uploaded = benchmark
+		return &commonpb.Empty{}, nil
+	}}
+	station, err := NewCrackstation("worker", t.TempDir(), h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	station.runBenchmarkRequest(&SliverServer{Crackstation: station, rpc: newBufConnClient(t, mock)})
+
+	if uploaded == nil || len(uploaded.GetBenchmarks()) == 0 {
+		t.Fatalf("uploaded benchmark = %#v; want recovered nonempty results", uploaded)
+	}
+	if uploaded.GetBenchmarks()[1000] != 42 || uploaded.GetBenchmarks()[74000] != 74 {
+		t.Fatalf("uploaded benchmarks = %v; want bulk mode 1000 and recovered mode 74000", uploaded.GetBenchmarks())
+	}
+	if _, found := uploaded.GetBenchmarks()[72000]; found {
+		t.Fatalf("uploaded benchmarks = %v; unavailable bridge mode 72000 must not be advertised", uploaded.GetBenchmarks())
+	}
+}
+
+func TestRequestedBenchmarkRetriesAgainOnReconnectEvent(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "benchmark-runs")
+	h := newScriptHashcat(t, `printf 'run\n' >> '`+marker+`'; printf '%s\n' '* Hash-Mode 1000 (NTLM)' 'Speed.#1.........: 88 H/s'`)
+	var uploads atomic.Int32
+	mock := &mockSliverRPC{CrackstationBenchmarkFunc: func(context.Context, *clientpb.CrackBenchmark) (*commonpb.Empty, error) {
+		if uploads.Add(1) <= int32(benchmarkMaxAttempts) {
+			return nil, status.Error(codes.Unavailable, "temporary outage")
+		}
+		return &commonpb.Empty{}, nil
+	}}
+	station, err := NewCrackstation("worker", t.TempDir(), h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &SliverServer{Crackstation: station, rpc: newBufConnClient(t, mock)}
+	// The first registration event exhausts its bounded upload retries. Since
+	// no benchmark was acknowledged, the server sends another event when this
+	// station reconnects.
+	station.runBenchmarkRequest(server)
+	station.runBenchmarkRequest(server)
+	if uploads.Load() != int32(benchmarkMaxAttempts+1) {
+		t.Fatalf("benchmark uploads = %d; reconnect event did not retry", uploads.Load())
+	}
+	runs, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(runs), "run\n") != 2 {
+		t.Fatalf("fresh benchmark runs = %q; want one per server request", runs)
+	}
+}
+
+func TestBenchmarkEventsAreBoundToConnectionGeneration(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "benchmark-runs")
+	firstStarted := filepath.Join(t.TempDir(), "first-started")
+	h := newScriptHashcat(t, `
+printf 'run\n' >> '`+marker+`'
+if [ ! -f '`+firstStarted+`' ]; then
+  : > '`+firstStarted+`'
+  while :; do :; done
+fi
+printf '%s\n' '* Hash-Mode 1000 (NTLM)' 'Speed.#1.........: 91 H/s'
+`)
+	uploaded := make(chan *clientpb.CrackBenchmark, 2)
+	mock := &mockSliverRPC{CrackstationBenchmarkFunc: func(_ context.Context, benchmark *clientpb.CrackBenchmark) (*commonpb.Empty, error) {
+		uploaded <- benchmark
+		return &commonpb.Empty{}, nil
+	}}
+	station, err := NewCrackstation("worker", t.TempDir(), h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &SliverServer{Crackstation: station, rpc: newBufConnClient(t, mock)}
+	oldConnectionDone := make(chan struct{})
+	newConnectionDone := make(chan struct{})
+	go station.Start()
+	t.Cleanup(station.Stop)
+
+	station.Events <- &ServerEvent{
+		Server: server, Event: &clientpb.Event{EventType: crackBenchmarkEvent}, ConnectionDone: oldConnectionDone,
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(firstStarted); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first benchmark did not start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	close(oldConnectionDone)
+	// Events already queued for the disconnected stream must be discarded.
+	station.Events <- &ServerEvent{
+		Server: server, Event: &clientpb.Event{EventType: crackBenchmarkEvent}, ConnectionDone: oldConnectionDone,
+	}
+	station.Events <- &ServerEvent{
+		Server: server, Event: &clientpb.Event{EventType: crackBenchmarkEvent}, ConnectionDone: oldConnectionDone,
+	}
+	station.Events <- &ServerEvent{
+		Server: server, Event: &clientpb.Event{EventType: crackBenchmarkEvent}, ConnectionDone: newConnectionDone,
+	}
+
+	select {
+	case benchmark := <-uploaded:
+		if benchmark.GetBenchmarks()[1000] != 91 {
+			t.Fatalf("uploaded benchmarks = %v", benchmark.GetBenchmarks())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("replacement connection benchmark did not complete")
+	}
+	select {
+	case duplicate := <-uploaded:
+		t.Fatalf("stale connection uploaded duplicate benchmark: %v", duplicate.GetBenchmarks())
+	case <-time.After(100 * time.Millisecond):
+	}
+	runs, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := strings.Count(string(runs), "run\n"); count != 2 {
+		t.Fatalf("benchmark runs = %d (%q); want cancelled old generation plus one replacement", count, runs)
+	}
 }

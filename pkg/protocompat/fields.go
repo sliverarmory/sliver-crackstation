@@ -126,6 +126,21 @@ func (r *Reader) Uint64(number protoreflect.FieldNumber) (uint64, error) {
 	return value.varint, nil
 }
 
+// Int64 reads a singular int64 field.
+func (r *Reader) Int64(number protoreflect.FieldNumber) (int64, error) {
+	if field := r.message.Descriptor().Fields().ByNumber(number); field != nil {
+		if field.IsList() || field.Kind() != protoreflect.Int64Kind {
+			return 0, fieldTypeError(number, "int64", field)
+		}
+		return r.message.Get(field).Int(), nil
+	}
+	value, ok := lastUnknownOfType(r.unknown[number], protowire.VarintType)
+	if !ok {
+		return 0, nil
+	}
+	return int64(value.varint), nil
+}
+
 // Int32 reads a singular int32 field.
 func (r *Reader) Int32(number protoreflect.FieldNumber) (int32, error) {
 	if field := r.message.Descriptor().Fields().ByNumber(number); field != nil {
@@ -133,6 +148,23 @@ func (r *Reader) Int32(number protoreflect.FieldNumber) (int32, error) {
 			return 0, fieldTypeError(number, "int32", field)
 		}
 		return int32(r.message.Get(field).Int()), nil
+	}
+	value, ok := lastUnknownOfType(r.unknown[number], protowire.VarintType)
+	if !ok {
+		return 0, nil
+	}
+	return int32(value.varint), nil
+}
+
+// Enum reads a singular enum field as its numeric value. Unknown fields use
+// the same varint representation, which keeps callers source-compatible while
+// independently released protobuf schemas roll forward.
+func (r *Reader) Enum(number protoreflect.FieldNumber) (int32, error) {
+	if field := r.message.Descriptor().Fields().ByNumber(number); field != nil {
+		if field.IsList() || field.Kind() != protoreflect.EnumKind {
+			return 0, fieldTypeError(number, "enum", field)
+		}
+		return int32(r.message.Get(field).Enum()), nil
 	}
 	value, ok := lastUnknownOfType(r.unknown[number], protowire.VarintType)
 	if !ok {
@@ -307,6 +339,25 @@ func fieldTypeError(number protoreflect.FieldNumber, expected string, field prot
 	return fmt.Errorf("protobuf field %d is %s, expected %s", number, field.Kind(), expected)
 }
 
+// Clear removes every occurrence of a field from either the known field set or
+// preserved unknown wire data.
+func Clear(message protoreflect.ProtoMessage, number protoreflect.FieldNumber) error {
+	if message == nil {
+		return fmt.Errorf("nil protobuf message")
+	}
+	reflected := message.ProtoReflect()
+	if field := reflected.Descriptor().Fields().ByNumber(number); field != nil {
+		reflected.Clear(field)
+		return nil
+	}
+	raw, err := withoutUnknownField(reflected.GetUnknown(), number)
+	if err != nil {
+		return err
+	}
+	reflected.SetUnknown(raw)
+	return nil
+}
+
 // SetBytes sets a bytes field. If the compiled descriptor predates the field,
 // the value is encoded into the message's unknown field set.
 func SetBytes(message protoreflect.ProtoMessage, number protoreflect.FieldNumber, value []byte) error {
@@ -411,6 +462,25 @@ func SetUint64(message protoreflect.ProtoMessage, number protoreflect.FieldNumbe
 	return nil
 }
 
+// SetInt64 sets an int64 field, using unknown wire data when necessary.
+func SetInt64(message protoreflect.ProtoMessage, number protoreflect.FieldNumber, value int64) error {
+	if message == nil {
+		return fmt.Errorf("nil protobuf message")
+	}
+	reflected := message.ProtoReflect()
+	if field := reflected.Descriptor().Fields().ByNumber(number); field != nil {
+		if field.IsList() || field.Kind() != protoreflect.Int64Kind {
+			return fieldTypeError(number, "int64", field)
+		}
+		reflected.Set(field, protoreflect.ValueOfInt64(value))
+		return nil
+	}
+	return replaceUnknown(message, number, func(raw []byte) []byte {
+		raw = protowire.AppendTag(raw, protowire.Number(number), protowire.VarintType)
+		return protowire.AppendVarint(raw, uint64(value))
+	})
+}
+
 // SetBool sets a bool field. Unknown fields are encoded even when value is
 // false so callers can preserve presence for a future optional field.
 func SetBool(message protoreflect.ProtoMessage, number protoreflect.FieldNumber, value bool) error {
@@ -476,6 +546,62 @@ func SetMessageBytesList(message protoreflect.ProtoMessage, number protoreflect.
 	return nil
 }
 
+// SetStrings replaces a repeated string field. Unknown descriptors encode one
+// length-delimited occurrence per string, matching the canonical protobuf wire
+// representation for an unpacked repeated string field.
+func SetStrings(message protoreflect.ProtoMessage, number protoreflect.FieldNumber, values []string) error {
+	if message == nil {
+		return fmt.Errorf("nil protobuf message")
+	}
+	reflected := message.ProtoReflect()
+	if field := reflected.Descriptor().Fields().ByNumber(number); field != nil {
+		if !field.IsList() || field.Kind() != protoreflect.StringKind {
+			return fieldTypeError(number, "repeated string", field)
+		}
+		list := reflected.Mutable(field).List()
+		list.Truncate(0)
+		for _, value := range values {
+			list.Append(protoreflect.ValueOfString(value))
+		}
+		return nil
+	}
+	return replaceUnknown(message, number, func(raw []byte) []byte {
+		for _, value := range values {
+			raw = protowire.AppendTag(raw, protowire.Number(number), protowire.BytesType)
+			raw = protowire.AppendString(raw, value)
+		}
+		return raw
+	})
+}
+
+// SetBytesList replaces a repeated bytes field. This is intentionally
+// separate from SetMessageBytesList: repeated bytes are opaque and must never
+// be decoded as embedded protobuf messages.
+func SetBytesList(message protoreflect.ProtoMessage, number protoreflect.FieldNumber, values [][]byte) error {
+	if message == nil {
+		return fmt.Errorf("nil protobuf message")
+	}
+	reflected := message.ProtoReflect()
+	if field := reflected.Descriptor().Fields().ByNumber(number); field != nil {
+		if !field.IsList() || field.Kind() != protoreflect.BytesKind {
+			return fieldTypeError(number, "repeated bytes", field)
+		}
+		list := reflected.Mutable(field).List()
+		list.Truncate(0)
+		for _, value := range values {
+			list.Append(protoreflect.ValueOfBytes(append([]byte(nil), value...)))
+		}
+		return nil
+	}
+	return replaceUnknown(message, number, func(raw []byte) []byte {
+		for _, value := range values {
+			raw = protowire.AppendTag(raw, protowire.Number(number), protowire.BytesType)
+			raw = protowire.AppendBytes(raw, value)
+		}
+		return raw
+	})
+}
+
 // SetInt32 sets an int32 field, using unknown wire data when necessary.
 func SetInt32(message protoreflect.ProtoMessage, number protoreflect.FieldNumber, value int32) error {
 	if message == nil {
@@ -499,6 +625,40 @@ func SetInt32(message protoreflect.ProtoMessage, number protoreflect.FieldNumber
 		raw = protowire.AppendVarint(raw, uint64(int64(value)))
 	}
 	reflected.SetUnknown(raw)
+	return nil
+}
+
+// SetEnum sets an enum field by numeric value. Unknown fields are encoded as a
+// varint until the compiled descriptor learns the enum.
+func SetEnum(message protoreflect.ProtoMessage, number protoreflect.FieldNumber, value int32) error {
+	if message == nil {
+		return fmt.Errorf("nil protobuf message")
+	}
+	reflected := message.ProtoReflect()
+	if field := reflected.Descriptor().Fields().ByNumber(number); field != nil {
+		if field.IsList() || field.Kind() != protoreflect.EnumKind {
+			return fieldTypeError(number, "enum", field)
+		}
+		reflected.Set(field, protoreflect.ValueOfEnum(protoreflect.EnumNumber(value)))
+		return nil
+	}
+	return replaceUnknown(message, number, func(raw []byte) []byte {
+		raw = protowire.AppendTag(raw, protowire.Number(number), protowire.VarintType)
+		return protowire.AppendVarint(raw, uint64(int64(value)))
+	})
+}
+
+func replaceUnknown(
+	message protoreflect.ProtoMessage,
+	number protoreflect.FieldNumber,
+	appendValue func([]byte) []byte,
+) error {
+	reflected := message.ProtoReflect()
+	raw, err := withoutUnknownField(reflected.GetUnknown(), number)
+	if err != nil {
+		return err
+	}
+	reflected.SetUnknown(appendValue(raw))
 	return nil
 }
 

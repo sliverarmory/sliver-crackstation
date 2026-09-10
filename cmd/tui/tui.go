@@ -1,12 +1,15 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
+	"os/signal"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"charm.land/bubbles/v2/spinner"
@@ -100,21 +103,51 @@ type crackstationModel struct {
 	height      int
 }
 
-func StartTUI(crack *crackstation.Crackstation) {
+func StartTUI(crack *crackstation.Crackstation) error {
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	return normalizeTUIShutdownError(ctx, startTUIContext(ctx, crack))
+}
+
+func normalizeTUIShutdownError(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	// Bubble Tea wraps every internal failure with ErrProgramKilled, including
+	// panics. Suppress it only when our signal context actually initiated the
+	// shutdown; preserve unrelated renderer/runtime failures for the CLI.
+	if ctx != nil && ctx.Err() != nil && errors.Is(err, tea.ErrProgramKilled) {
+		return nil
+	}
+	if errors.Is(err, tea.ErrInterrupted) {
+		return nil
+	}
+	return err
+}
+
+func startTUIContext(ctx context.Context, crack *crackstation.Crackstation, options ...tea.ProgramOption) error {
 	go crack.Start()
 	defer crack.Stop()
 
 	statusSub := crack.StatusBroker.Subscribe()
 	defer crack.StatusBroker.Unsubscribe(statusSub)
 
-	p := tea.NewProgram(newModel(crack, statusSub))
-	if _, err := p.Run(); err != nil {
-		slog.Error("TUI failed", "err", err)
-		os.Exit(1)
-	}
+	// The process-level signal context owns shutdown so every exit path reaches
+	// the synchronous Crackstation.Stop barrier. Bubble Tea's independent signal
+	// handler is disabled to avoid racing that lifecycle.
+	options = append(options, tea.WithContext(ctx), tea.WithoutSignalHandler())
+	p := tea.NewProgram(newModel(crack, statusSub), options...)
+	_, err := p.Run()
+	return err
 }
 
 func StartLogOnly(crack *crackstation.Crackstation, out io.Writer) {
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	startLogOnlyContext(ctx, crack, out)
+}
+
+func startLogOnlyContext(ctx context.Context, crack *crackstation.Crackstation, out io.Writer) {
 	go crack.Start()
 	defer crack.Stop()
 
@@ -122,13 +155,21 @@ func StartLogOnly(crack *crackstation.Crackstation, out io.Writer) {
 	defer crack.StatusBroker.Unsubscribe(statusSub)
 
 	var lastKey string
-	for status := range statusSub {
-		key := statusKey(status)
-		if key == lastKey {
-			continue
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case status, ok := <-statusSub:
+			if !ok {
+				return
+			}
+			key := statusKey(status)
+			if key == lastKey {
+				continue
+			}
+			fmt.Fprintln(out, formatStatusLine(status, time.Now()))
+			lastKey = key
 		}
-		fmt.Fprintln(out, formatStatusLine(status, time.Now()))
-		lastKey = key
 	}
 }
 
@@ -666,7 +707,7 @@ func countServerStates(crack *crackstation.Crackstation) (int, int, int) {
 		if !ok || server == nil {
 			return true
 		}
-		switch server.State {
+		switch server.ConnectionState() {
 		case crackstation.CONNECTED:
 			connected++
 		case crackstation.CONNECTING:
@@ -685,7 +726,7 @@ func reconnectSummary(crack *crackstation.Crackstation, now time.Time) (int, tim
 	var next time.Duration
 	crack.Servers.Range(func(_, value interface{}) bool {
 		server, ok := value.(*crackstation.SliverServer)
-		if !ok || server == nil || server.State != crackstation.DISCONNECTED {
+		if !ok || server == nil || server.ConnectionState() != crackstation.DISCONNECTED {
 			return true
 		}
 		remaining := server.ReconnectIn(now)

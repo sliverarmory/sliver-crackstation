@@ -18,7 +18,12 @@ package crackstation
 	along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-import "github.com/bishopfox/sliver/protobuf/clientpb"
+import (
+	"sync"
+
+	"github.com/bishopfox/sliver/protobuf/clientpb"
+	"google.golang.org/protobuf/proto"
+)
 
 const (
 	// Size is arbitrary, just want to avoid weird cases where we'd block on channel sends
@@ -26,66 +31,73 @@ const (
 )
 
 type eventBroker struct {
-	stop        chan struct{}
-	publish     chan *clientpb.CrackstationStatus
-	subscribe   chan chan *clientpb.CrackstationStatus
-	unsubscribe chan chan *clientpb.CrackstationStatus
-	send        chan *clientpb.CrackstationStatus
+	mu          sync.Mutex
+	subscribers map[chan *clientpb.CrackstationStatus]struct{}
+	stopped     bool
 }
 
-// Start - Start a broker channel
-func (broker *eventBroker) Start() {
-	subscribers := map[chan *clientpb.CrackstationStatus]struct{}{}
-	for {
-		select {
-		case <-broker.stop:
-			for sub := range subscribers {
-				close(sub)
-			}
-			return
-		case sub := <-broker.subscribe:
-			subscribers[sub] = struct{}{}
-		case sub := <-broker.unsubscribe:
-			delete(subscribers, sub)
-		case event := <-broker.publish:
-			for sub := range subscribers {
-				sub <- event
-			}
-		}
-	}
-}
+// Start is retained for source compatibility; newBroker starts ready to use.
+func (broker *eventBroker) Start() {}
 
 // Stop - Close the broker channel
 func (broker *eventBroker) Stop() {
-	close(broker.stop)
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+	if broker.stopped {
+		return
+	}
+	broker.stopped = true
+	for subscriber := range broker.subscribers {
+		close(subscriber)
+		delete(broker.subscribers, subscriber)
+	}
 }
 
 // Subscribe - Generate a new subscription channel
 func (broker *eventBroker) Subscribe() chan *clientpb.CrackstationStatus {
 	events := make(chan *clientpb.CrackstationStatus, eventBufSize)
-	broker.subscribe <- events
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+	if broker.stopped {
+		close(events)
+		return events
+	}
+	broker.subscribers[events] = struct{}{}
 	return events
 }
 
 // Unsubscribe - Remove a subscription channel
 func (broker *eventBroker) Unsubscribe(events chan *clientpb.CrackstationStatus) {
-	broker.unsubscribe <- events
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+	if _, ok := broker.subscribers[events]; !ok {
+		return
+	}
+	delete(broker.subscribers, events)
 	close(events)
 }
 
 // Publish - Push a message to all subscribers
 func (broker *eventBroker) Publish(event *clientpb.CrackstationStatus) {
-	broker.publish <- event
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+	if broker.stopped {
+		return
+	}
+	for subscriber := range broker.subscribers {
+		snapshot := event
+		if event != nil {
+			snapshot = proto.Clone(event).(*clientpb.CrackstationStatus)
+		}
+		select {
+		case subscriber <- snapshot:
+		default:
+			// Status is a periodic snapshot; dropping an obsolete snapshot is
+			// preferable to blocking the worker behind a slow UI subscriber.
+		}
+	}
 }
 
 func newBroker() *eventBroker {
-	broker := &eventBroker{
-		stop:        make(chan struct{}),
-		publish:     make(chan *clientpb.CrackstationStatus, eventBufSize),
-		subscribe:   make(chan chan *clientpb.CrackstationStatus, eventBufSize),
-		unsubscribe: make(chan chan *clientpb.CrackstationStatus, eventBufSize),
-		send:        make(chan *clientpb.CrackstationStatus, eventBufSize),
-	}
-	go broker.Start()
-	return broker
+	return &eventBroker{subscribers: map[chan *clientpb.CrackstationStatus]struct{}{}}
 }

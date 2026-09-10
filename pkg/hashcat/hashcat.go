@@ -19,15 +19,20 @@ package hashcat
 */
 
 import (
+	"bufio"
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/bishopfox/sliver/protobuf/clientpb"
 )
@@ -51,11 +56,21 @@ type Hashcat struct {
 	cwd        string
 	hashcatDir string
 	version    string
+	versionMu  sync.Mutex
 
 	CUDABackend   []*clientpb.CUDABackendInfo
 	HIPBackend    []*HIPBackendInfo
 	MetalBackend  []*clientpb.MetalBackendInfo
 	OpenCLBackend []*clientpb.OpenCLBackendInfo
+
+	fileResolver func(string) (string, error)
+}
+
+// SetFileResolver installs a resolver for content-addressed file references
+// such as crackfile://wordlist/<sha256>. The resolver is configured once while
+// the crackstation starts, before Hashcat tasks are accepted.
+func (h *Hashcat) SetFileResolver(resolver func(string) (string, error)) {
+	h.fileResolver = resolver
 }
 
 // CommandResult contains the process output result of one Hashcat process. Keeping
@@ -74,7 +89,10 @@ type CommandResult struct {
 // Keep a task result comfortably below gRPC and database limits even for
 // output-oriented modes such as --stdout, --show, and --left. Hashcat is still
 // drained completely so a full pipe cannot deadlock the child process.
-const maxCapturedOutputBytes = 8 << 20
+const (
+	maxCapturedOutputBytes = 8 << 20
+	maxHashcatStatusBytes  = 1 << 20
+)
 
 func (h *Hashcat) hashcatCmd(args []string) ([]byte, error) {
 	result, err := h.runHashcat(args, nil)
@@ -82,18 +100,78 @@ func (h *Hashcat) hashcatCmd(args []string) ([]byte, error) {
 }
 
 func (h *Hashcat) runHashcat(args []string, stdin []byte) (CommandResult, error) {
+	return h.runHashcatStreaming(context.Background(), args, stdin, nil)
+}
+
+// runHashcatStreaming executes Hashcat while preserving both output streams
+// and forwarding each machine-readable JSON status object as it arrives.
+func (h *Hashcat) runHashcatStreaming(
+	ctx context.Context,
+	args []string,
+	stdin []byte,
+	onStatus func([]byte),
+) (CommandResult, error) {
+	return h.runHashcatStreamingInDirectory(ctx, args, stdin, onStatus, h.cwd)
+}
+
+func (h *Hashcat) runHashcatStreamingInDirectory(
+	ctx context.Context,
+	args []string,
+	stdin []byte,
+	onStatus func([]byte),
+	workingDirectory string,
+) (CommandResult, error) {
 	slog.Debug("Executing hashcat", "exe", h.exe, "args", strings.Join(redactHashcatArgs(args), " "))
-	cmd := exec.Command(h.exe, args...)
-	cmd.Dir = h.cwd
+	cmd := exec.CommandContext(ctx, h.exe, args...)
+	cmd.Dir = workingDirectory
 	cmd.Env = os.Environ()
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
 	stdout := newLimitedBuffer(maxCapturedOutputBytes)
 	stderr := newLimitedBuffer(maxCapturedOutputBytes)
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	err := cmd.Run()
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return CommandResult{ExitCode: -1}, err
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return CommandResult{ExitCode: -1}, err
+	}
+	if err := cmd.Start(); err != nil {
+		return CommandResult{ExitCode: -1}, err
+	}
+
+	var callbackMu sync.Mutex
+	forwardStatus := func(statusJSON []byte) {
+		if onStatus == nil {
+			return
+		}
+		callbackMu.Lock()
+		onStatus(statusJSON)
+		callbackMu.Unlock()
+	}
+	readErrors := make(chan error, 2)
+	var readers sync.WaitGroup
+	readers.Add(2)
+	go func() {
+		defer readers.Done()
+		readErrors <- captureHashcatStream(stdoutPipe, stdout, forwardStatus)
+	}()
+	go func() {
+		defer readers.Done()
+		readErrors <- captureHashcatStream(stderrPipe, stderr, forwardStatus)
+	}()
+
+	readers.Wait()
+	waitErr := cmd.Wait()
+	close(readErrors)
+	var readErr error
+	for candidate := range readErrors {
+		if candidate != nil && readErr == nil {
+			readErr = candidate
+		}
+	}
 	result := CommandResult{
 		Stdout:           stdout.Bytes(),
 		Stderr:           stderr.Bytes(),
@@ -102,15 +180,78 @@ func (h *Hashcat) runHashcat(args []string, stdin []byte) (CommandResult, error)
 		StdoutTotalBytes: stdout.TotalBytes(),
 		StderrTotalBytes: stderr.TotalBytes(),
 	}
-	if err != nil {
+	if waitErr != nil {
 		result.ExitCode = -1
 		var exitError *exec.ExitError
-		if errors.As(err, &exitError) {
+		if errors.As(waitErr, &exitError) {
 			result.ExitCode = int32(exitError.ExitCode())
 		}
-		slog.Error("Hashcat command failed", "err", err, "exit_code", result.ExitCode, "stdout_bytes", stdout.TotalBytes(), "stderr_bytes", stderr.TotalBytes(), "output_truncated", result.StdoutTruncated || result.StderrTruncated)
+		// Hashcat exit code 1 means the candidate space was exhausted without
+		// a recovery. That is a successful terminal result for a queue shard.
+		if result.ExitCode != 1 {
+			slog.Error("Hashcat command failed", "err", waitErr, "exit_code", result.ExitCode, "stdout_bytes", stdout.TotalBytes(), "stderr_bytes", stderr.TotalBytes(), "output_truncated", result.StdoutTruncated || result.StderrTruncated)
+			return result, waitErr
+		}
 	}
-	return result, err
+	if readErr != nil {
+		return result, readErr
+	}
+	return result, nil
+}
+
+func captureHashcatStream(reader io.Reader, output io.Writer, onStatus func([]byte)) error {
+	buffered := bufio.NewReaderSize(reader, 64<<10)
+	statusLine := make([]byte, 0, 64<<10)
+	statusLineTooLarge := false
+	for {
+		fragment, err := buffered.ReadSlice('\n')
+		if len(fragment) > 0 {
+			if _, writeErr := output.Write(fragment); writeErr != nil {
+				return writeErr
+			}
+			if !statusLineTooLarge {
+				if len(statusLine)+len(fragment) <= maxHashcatStatusBytes {
+					statusLine = append(statusLine, fragment...)
+				} else {
+					statusLine = statusLine[:0]
+					statusLineTooLarge = true
+				}
+			}
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		if !statusLineTooLarge && len(statusLine) != 0 {
+			trimmed := bytes.TrimSpace(statusLine)
+			if isHashcatStatusJSON(trimmed) {
+				onStatus(append([]byte(nil), trimmed...))
+			}
+		}
+		statusLine = statusLine[:0]
+		statusLineTooLarge = false
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+	}
+}
+
+func isHashcatStatusJSON(data []byte) bool {
+	if len(data) < 2 || data[0] != '{' || data[len(data)-1] != '}' {
+		return false
+	}
+	value := map[string]json.RawMessage{}
+	if json.Unmarshal(data, &value) != nil {
+		return false
+	}
+	for _, key := range []string{"status", "progress", "devices", "session"} {
+		if _, ok := value[key]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func redactHashcatArgs(args []string) []string {
@@ -420,6 +561,8 @@ func (h *Hashcat) parseOpenCLDevice(index int, lines []string) *clientpb.OpenCLB
 }
 
 func (h *Hashcat) Version() string {
+	h.versionMu.Lock()
+	defer h.versionMu.Unlock()
 	if h.version != "" {
 		return h.version
 	}

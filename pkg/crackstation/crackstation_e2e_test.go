@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,8 +58,9 @@ func TestCrackstationCrackTaskE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to generate plaintext: %v", err)
 	}
-	hash := md5.Sum([]byte(plaintext))
-	hashHex := hex.EncodeToString(hash[:])
+	const salt = "sliver-salt"
+	hash := md5.Sum([]byte(plaintext + salt))
+	hashInput := strings.ToUpper(hex.EncodeToString(hash[:])) + ":" + salt
 
 	potfilePath := filepath.Join(rootDir, "hashcat.potfile")
 	potfile, err := os.Create(potfilePath)
@@ -71,26 +73,40 @@ func TestCrackstationCrackTaskE2E(t *testing.T) {
 
 	taskID := uuid.Must(uuid.NewV4())
 	crackCmd := &clientpb.CrackCommand{
+		AttackMode:          clientpb.CrackAttackMode_BRUTEFORCE,
 		HashType:            clientpb.HashType_INVALID,
-		Hashes:              []string{hashHex},
+		Hashes:              []string{hashInput},
 		Potfile:             []byte(potfilePath),
 		BackendIgnoreOpenCL: true,
 		Force:               true,
 		Quiet:               true,
 	}
-	if err := protocompat.SetUint32(crackCmd, 157, 0); err != nil {
+	if err := protocompat.SetUint32(crackCmd, 157, 10); err != nil {
 		t.Fatalf("failed to encode Hashcat v7 hash mode: %v", err)
 	}
-	if err := protocompat.SetBytes(crackCmd, 155, []byte(plaintext+"\n")); err != nil {
-		t.Fatalf("failed to encode Hashcat stdin: %v", err)
+	if err := protocompat.SetStrings(crackCmd, 143, []string{plaintext}); err != nil {
+		t.Fatalf("failed to encode Hashcat mask: %v", err)
 	}
-	task := &clientpb.CrackTask{ID: taskID.String(), Command: crackCmd}
+	task := &clientpb.CrackTask{ID: taskID.String(), HostUUID: HostUUID, Command: crackCmd}
+	for _, err := range []error{
+		protocompat.SetEnum(task, crackTaskKindField, int32(crackTaskKindCrack)),
+		protocompat.SetEnum(task, crackTaskStateField, int32(crackTaskStateLeased)),
+		protocompat.SetUint32(task, crackTaskAttemptField, 1),
+		protocompat.SetString(task, crackTaskLeaseTokenField, "e2e-lease"),
+		protocompat.SetInt64(task, crackTaskUpdatedAtField, time.Now().Unix()),
+		protocompat.SetInt64(task, crackTaskLeaseExpiresAtField, time.Now().Add(2*time.Minute).Unix()),
+	} {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	dispatch := assignmentData(t, task)
 
 	updateCh := make(chan *clientpb.CrackTask, 2)
 
 	mock := &mockSliverRPC{
 		CrackstationRegisterFunc: func(_ *clientpb.Crackstation, stream rpcpb.SliverRPC_CrackstationRegisterServer) error {
-			event := &clientpb.Event{EventType: crackEvent, Data: taskID.Bytes()}
+			event := &clientpb.Event{EventType: crackEvent, Data: dispatch}
 			if err := stream.Send(event); err != nil {
 				return status.Errorf(codes.Internal, "failed to send event: %v", err)
 			}
@@ -165,13 +181,23 @@ done:
 	if exitCode != 0 {
 		t.Fatalf("hashcat exit code = %d; want 0", exitCode)
 	}
-
-	potfileData, err := os.ReadFile(potfilePath)
+	recoveredJSON, err := resultFields.Bytes(crackTaskRecoveredJSONField)
 	if err != nil {
-		t.Fatalf("failed to read potfile: %v", err)
+		t.Fatalf("failed to decode recovered credentials: %v", err)
 	}
-	if !strings.Contains(string(potfileData), hashHex+":"+plaintext) {
-		t.Fatalf("potfile did not contain cracked value for %s", hashHex)
+	var recovered []recoveredCredential
+	if err := json.Unmarshal(recoveredJSON, &recovered); err != nil {
+		t.Fatalf("failed to unmarshal recovered credentials %q: %v", recoveredJSON, err)
+	}
+	if len(recovered) != 1 || recovered[0].Hash != hashInput || string(recovered[0].Plaintext) != plaintext {
+		t.Fatalf("recovered credentials = %#v; want exact salted hash %q and plaintext", recovered, hashInput)
+	}
+	potfileInfo, err := os.Stat(potfilePath)
+	if err != nil {
+		t.Fatalf("failed to stat isolated potfile: %v", err)
+	}
+	if potfileInfo.Size() != 0 {
+		t.Fatalf("managed queue task wrote %d bytes to shared potfile", potfileInfo.Size())
 	}
 }
 

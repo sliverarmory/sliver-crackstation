@@ -19,7 +19,11 @@ package hashcat
 */
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +31,11 @@ import (
 	"github.com/bishopfox/sliver/protobuf/clientpb"
 	"github.com/sliverarmory/sliver-crackstation/assets"
 )
+
+// ManagedWorkDirPrefix identifies per-process working directories used to
+// prevent Hashcat from reinterpreting an inline mask or charset as a file in
+// its installation directory.
+const ManagedWorkDirPrefix = ".hashcat-managed-work-"
 
 func (h *Hashcat) Crack(cmd *clientpb.CrackCommand) ([]byte, error) {
 	result, err := h.CrackWithResult(cmd)
@@ -36,6 +45,17 @@ func (h *Hashcat) Crack(cmd *clientpb.CrackCommand) ([]byte, error) {
 // CrackWithResult runs Hashcat and preserves both output streams and the exit
 // code for the gRPC task result.
 func (h *Hashcat) CrackWithResult(cmd *clientpb.CrackCommand) (CommandResult, error) {
+	return h.CrackWithResultStreamingContext(context.Background(), cmd, nil)
+}
+
+// CrackWithResultStreaming runs Hashcat and invokes onStatus for every complete
+// JSON status object emitted on stdout or stderr.
+func (h *Hashcat) CrackWithResultStreaming(cmd *clientpb.CrackCommand, onStatus func([]byte)) (CommandResult, error) {
+	return h.CrackWithResultStreamingContext(context.Background(), cmd, onStatus)
+}
+
+// CrackWithResultStreamingContext is the context-aware streaming entrypoint.
+func (h *Hashcat) CrackWithResultStreamingContext(ctx context.Context, cmd *clientpb.CrackCommand, onStatus func([]byte)) (CommandResult, error) {
 	if cmd == nil {
 		return CommandResult{ExitCode: -1}, fmt.Errorf("missing crack command")
 	}
@@ -52,7 +72,40 @@ func (h *Hashcat) CrackWithResult(cmd *clientpb.CrackCommand) (CommandResult, er
 	if err != nil {
 		return CommandResult{ExitCode: -1}, err
 	}
-	return h.runHashcat(args, v7Fields.stdin)
+	return h.runHashcatStreaming(ctx, args, v7Fields.stdin, onStatus)
+}
+
+// CrackManagedWithResultStreamingContext executes a server-owned queue task in
+// an empty working directory. Hashcat accepts either inline values or local
+// filenames in mask and custom-charset positions; isolation makes that choice
+// deterministic and prevents an operator-controlled value from probing or
+// consuming a crackstation-local file with the same name.
+func (h *Hashcat) CrackManagedWithResultStreamingContext(ctx context.Context, cmd *clientpb.CrackCommand, onStatus func([]byte)) (CommandResult, error) {
+	if cmd == nil {
+		return CommandResult{ExitCode: -1}, fmt.Errorf("missing crack command")
+	}
+	if err := h.ValidateManagedTaskCommand(cmd); err != nil {
+		return CommandResult{ExitCode: -1}, err
+	}
+	v7Fields, err := readCrackCommandV7Fields(cmd)
+	if err != nil {
+		return CommandResult{ExitCode: -1}, fmt.Errorf("decode Hashcat 7 command fields: %w", err)
+	}
+	args, cleanup, err := h.parseUserTaskArgsWithFields(cmd, v7Fields)
+	defer func() {
+		for _, path := range cleanup {
+			_ = os.Remove(path)
+		}
+	}()
+	if err != nil {
+		return CommandResult{ExitCode: -1}, err
+	}
+	workingDirectory, err := os.MkdirTemp(assets.GetAppTmpDir(), ManagedWorkDirPrefix)
+	if err != nil {
+		return CommandResult{ExitCode: -1}, fmt.Errorf("create isolated Hashcat working directory: %w", err)
+	}
+	defer os.RemoveAll(workingDirectory)
+	return h.runHashcatStreamingInDirectory(ctx, args, v7Fields.stdin, onStatus, workingDirectory)
 }
 
 func (h *Hashcat) parseUserTaskArgs(cmd *clientpb.CrackCommand) ([]string, []string, error) {
@@ -144,14 +197,20 @@ func (h *Hashcat) parseUserTaskArgsWithFields(cmd *clientpb.CrackCommand, v7Fiel
 		args = append(args, "--loopback")
 	}
 	if len(cmd.MarkovHcstat2) != 0 {
-		tmp, err := os.CreateTemp(appTmpDir, "markov-hcstat2")
-		if err != nil {
+		if path, managed, err := h.resolveFileReference(string(cmd.MarkovHcstat2)); err != nil {
 			return nil, cleanup, err
+		} else if managed {
+			args = append(args, fmt.Sprintf("--markov-hcstat2=%s", path))
+		} else {
+			tmp, err := os.CreateTemp(appTmpDir, "markov-hcstat2")
+			if err != nil {
+				return nil, cleanup, err
+			}
+			tmp.Write(cmd.MarkovHcstat2)
+			tmp.Close()
+			cleanup = append(cleanup, tmp.Name())
+			args = append(args, fmt.Sprintf("--markov-hcstat2=%s", tmp.Name()))
 		}
-		tmp.Write(cmd.MarkovHcstat2)
-		tmp.Close()
-		cleanup = append(cleanup, tmp.Name())
-		args = append(args, fmt.Sprintf("--markov-hcstat2=%s", tmp.Name()))
 	}
 	if cmd.MarkovDisable {
 		args = append(args, "--markov-disable")
@@ -310,9 +369,14 @@ func (h *Hashcat) parseUserTaskArgsWithFields(cmd *clientpb.CrackCommand, v7Fiel
 		if err != nil {
 			return nil, cleanup, err
 		}
-		tmp.Write(cmd.KeyboardLayoutMapping)
-		tmp.Close()
 		cleanup = append(cleanup, tmp.Name())
+		if _, err := tmp.Write(cmd.KeyboardLayoutMapping); err != nil {
+			tmp.Close()
+			return nil, cleanup, err
+		}
+		if err := tmp.Close(); err != nil {
+			return nil, cleanup, err
+		}
 		args = append(args, fmt.Sprintf("--keyboard-layout-mapping=%s", tmp.Name()))
 	}
 	if v7Fields.truecryptKeyfiles != "" {
@@ -503,21 +567,15 @@ func (h *Hashcat) parseUserTaskArgsWithFields(cmd *clientpb.CrackCommand, v7Fiel
 	} else if cmd.GenerateRulesSeed != 0 {
 		args = append(args, fmt.Sprintf("--generate-rules-seed=%d", cmd.GenerateRulesSeed))
 	}
-	if cmd.CustomCharset1 != "" {
-		args = append(args, fmt.Sprintf("--custom-charset1=%s", cmd.CustomCharset1))
-	}
-	if cmd.CustomCharset2 != "" {
-		args = append(args, fmt.Sprintf("--custom-charset2=%s", cmd.CustomCharset2))
-	}
-	if cmd.CustomCharset3 != "" {
-		args = append(args, fmt.Sprintf("--custom-charset3=%s", cmd.CustomCharset3))
-	}
-	if cmd.CustomCharset4 != "" {
-		args = append(args, fmt.Sprintf("--custom-charset4=%s", cmd.CustomCharset4))
-	}
-	for index, charset := range v7Fields.customCharsets {
+	customCharsets := []string{cmd.CustomCharset1, cmd.CustomCharset2, cmd.CustomCharset3, cmd.CustomCharset4}
+	customCharsets = append(customCharsets, v7Fields.customCharsets[:]...)
+	for index, charset := range customCharsets {
 		if charset != "" {
-			args = append(args, fmt.Sprintf("--custom-charset%d=%s", index+5, charset))
+			resolved, err := h.resolveCandidateFileOrInline(charset, fmt.Sprintf("custom charset %d", index+1))
+			if err != nil {
+				return nil, cleanup, err
+			}
+			args = append(args, fmt.Sprintf("--custom-charset%d=%s", index+1, resolved))
 		}
 	}
 	if cmd.Increment {
@@ -602,6 +660,12 @@ func (h *Hashcat) parseUserTaskArgsWithFields(cmd *clientpb.CrackCommand, v7Fiel
 		rulesFiles = [][]byte{cmd.RulesFile}
 	}
 	for _, rulesFile := range rulesFiles {
+		if path, managed, err := h.resolveFileReference(string(rulesFile)); err != nil {
+			return nil, cleanup, err
+		} else if managed {
+			args = append(args, fmt.Sprintf("--rules-file=%s", path))
+			continue
+		}
 		tmp, err := os.CreateTemp(appTmpDir, "rules")
 		if err != nil {
 			return nil, cleanup, err
@@ -622,19 +686,32 @@ func (h *Hashcat) parseUserTaskArgsWithFields(cmd *clientpb.CrackCommand, v7Fiel
 		if err != nil {
 			return nil, cleanup, err
 		}
-		for _, hash := range cmd.Hashes {
-			_, _ = tmp.WriteString(hash + "\n")
-		}
-		tmp.Close()
 		cleanup = append(cleanup, tmp.Name())
+		if err := writeHashLinesAndClose(tmp, cmd.Hashes); err != nil {
+			return nil, cleanup, fmt.Errorf("write hash input file: %w", err)
+		}
 		operands = append(operands, tmp.Name())
 	}
-	if len(v7Fields.positionalArguments) != 0 {
-		operands = append(operands, v7Fields.positionalArguments...)
-	} else if cmd.Identify != "" {
-		// Field 100 predates Hashcat's --identify option and was historically
-		// used as the single positional mask/wordlist argument.
-		operands = append(operands, cmd.Identify)
+	attackOperands := commandAttackOperands(cmd, v7Fields)
+	for index, operand := range attackOperands {
+		if strings.ContainsRune(operand, '\x00') {
+			return nil, cleanup, fmt.Errorf("hashcat positional arguments cannot contain NUL bytes")
+		}
+		path, managed, err := h.resolveFileReference(operand)
+		if err != nil {
+			return nil, cleanup, err
+		}
+		if managed {
+			if !isManagedWordlistReference(operand) {
+				return nil, cleanup, fmt.Errorf("hashcat attack operand %q must use a crackfile://wordlist/ reference", operand)
+			}
+			operand = path
+		} else if attackOperandIsMask(cmd.GetAttackMode(), index, len(attackOperands)) {
+			if err := h.rejectExistingLocalCandidatePath(operand, "mask operand", "upload it and use a managed crackfile://wordlist/<sha256> reference"); err != nil {
+				return nil, cleanup, err
+			}
+		}
+		operands = append(operands, operand)
 	}
 	for _, operand := range operands {
 		if strings.ContainsRune(operand, '\x00') {
@@ -649,4 +726,336 @@ func (h *Hashcat) parseUserTaskArgsWithFields(cmd *clientpb.CrackCommand, v7Fiel
 	}
 
 	return args, cleanup, nil
+}
+
+func writeHashLinesAndClose(writer io.WriteCloser, hashes []string) error {
+	var writeErr error
+	for _, hash := range hashes {
+		line := hash + "\n"
+		written, err := io.WriteString(writer, line)
+		if err != nil {
+			writeErr = err
+			break
+		}
+		if written != len(line) {
+			writeErr = io.ErrShortWrite
+			break
+		}
+	}
+	closeErr := writer.Close()
+	if writeErr != nil || closeErr != nil {
+		return errors.Join(writeErr, closeErr)
+	}
+	return nil
+}
+
+func (h *Hashcat) resolveFileReference(value string) (string, bool, error) {
+	if !strings.HasPrefix(value, "crackfile://") {
+		return value, false, nil
+	}
+	if h.fileResolver == nil {
+		return "", true, fmt.Errorf("managed crack file %q cannot be resolved", value)
+	}
+	path, err := h.fileResolver(value)
+	if err != nil {
+		return "", true, fmt.Errorf("resolve managed crack file %q: %w", value, err)
+	}
+	if path == "" {
+		return "", true, fmt.Errorf("resolve managed crack file %q: empty path", value)
+	}
+	return path, true, nil
+}
+
+// ValidateManagedTaskCommand enforces the deterministic positional contract
+// used by distributed queue tasks. Wordlists must come from the synchronized
+// content-addressed cache, while masks may remain inline as long as Hashcat
+// cannot reinterpret them as crackstation-local files.
+func (h *Hashcat) ValidateManagedTaskCommand(command *clientpb.CrackCommand) error {
+	if command == nil {
+		return fmt.Errorf("missing crack command")
+	}
+	fields, err := readCrackCommandV7Fields(command)
+	if err != nil {
+		return fmt.Errorf("decode Hashcat 7 command fields: %w", err)
+	}
+	if command.GetDebugMode() != 0 || fields.debugFile != "" {
+		return fmt.Errorf("hashcat debug output is not permitted for managed tasks")
+	}
+	if fields.hashMode != nil && *fields.hashMode > uint32(math.MaxInt32) {
+		return fmt.Errorf("hashcat hash mode exceeds the managed-task range")
+	}
+	if command.GetSeparator() != "" && (len(command.GetSeparator()) != 1 || strings.ContainsAny(command.GetSeparator(), "\x00\r\n")) {
+		return fmt.Errorf("hashcat separator must be exactly one non-NUL byte without a line break")
+	}
+	if command.GetSegmentSize() != 0 {
+		return fmt.Errorf("hashcat segment size is not supported by managed tasks")
+	}
+	if fields.generateRulesSeedV7 == nil && command.GetGenerateRulesSeed() < 0 {
+		return fmt.Errorf("hashcat managed-task generated-rules seed cannot be negative")
+	}
+	for _, hash := range command.GetHashes() {
+		if strings.TrimSpace(hash) == "" || strings.ContainsAny(hash, "\x00\r\n") {
+			return fmt.Errorf("hashcat managed-task hash is empty or contains a line break or NUL")
+		}
+	}
+	for name, value := range map[string]string{
+		"rule-left":               fields.ruleLeft,
+		"rule-right":              fields.ruleRight,
+		"generate-rules-func-sel": command.GetGenerateRulesFuncSel(),
+		"encoding-from":           fields.encodingFromName,
+		"encoding-to":             fields.encodingToName,
+	} {
+		if strings.ContainsRune(value, '\x00') {
+			return fmt.Errorf("hashcat %s cannot contain a NUL byte", name)
+		}
+	}
+	if command.GetUsername() || command.GetLoopback() || command.GetRemove() || command.GetRemoveTimer() != 0 || command.GetRuntime() != 0 || command.GetSession() != "" || command.GetKeepGuessing() {
+		return fmt.Errorf("hashcat local mutation, runtime, and session modes are not permitted for managed tasks")
+	}
+	if command.GetMachineReadable() || command.GetHwmonDisable() {
+		return fmt.Errorf("hashcat managed status and hardware monitoring cannot be overridden")
+	}
+	outfileCheckTimerEnabled := command.GetOutfileCheckTimer() != 0
+	if fields.outfileCheckTimerV7 != nil {
+		outfileCheckTimerEnabled = *fields.outfileCheckTimerV7 != 0
+	}
+	if fields.inductionDir != "" || fields.outfileCheckDir != "" || outfileCheckTimerEnabled {
+		return fmt.Errorf("hashcat local input and outfile-check paths are not permitted for managed tasks")
+	}
+	if fields.truecryptKeyfiles != "" || fields.veracryptKeyfiles != "" {
+		return fmt.Errorf("hashcat local keyfiles are not permitted for managed tasks")
+	}
+	if command.GetBenchmark() || command.GetBenchmarkAll() || fields.benchmarkMin != 0 || fields.benchmarkMax != nil || command.GetSpeedOnly() || command.GetProgressOnly() || command.GetStdout() || command.GetShow() || command.GetLeft() {
+		return fmt.Errorf("hashcat query, benchmark, and output-only modes are not permitted for managed tasks")
+	}
+	if command.GetHashInfo() || fields.hashInfoLevel != 0 || command.GetBackendInfo() || fields.backendInfoLevel != 0 || fields.totalCandidates || fields.lookup != "" || fields.identifyMode {
+		return fmt.Errorf("hashcat information and lookup modes are not permitted for managed tasks")
+	}
+	if command.GetRestore() || len(command.GetRestoreFile()) != 0 || fields.restorePosition || fields.restoreShowCommand || len(fields.stdin) != 0 {
+		return fmt.Errorf("hashcat restore and stdin modes are not permitted for managed tasks")
+	}
+	if command.GetBrainServer() || command.GetBrainClient() || command.GetBrainServerTimer() != 0 || command.GetBrainClientFeatures() != "" || command.GetBrainHost() != "" || command.GetBrainPort() != 0 || command.GetBrainPassword() != "" || command.GetBrainSession() != "" || command.GetBrainSessionWhitelist() != "" || fields.brainFeed || fields.brainServerTimerV7 != nil || fields.brainClientFeaturesV7 != 0 || fields.brainSessionV7 != nil || len(fields.brainWhitelistV7) != 0 || fields.brainPasswordV7 != nil {
+		return fmt.Errorf("hashcat brain networking is not permitted for managed tasks")
+	}
+	if fields.encryptWithPubkey != "" {
+		return fmt.Errorf("hashcat public-key output is not permitted for managed tasks")
+	}
+	if fields.seekDBPath != "" {
+		return fmt.Errorf("hashcat seek database paths are not permitted for managed tasks")
+	}
+	for _, parameter := range fields.bridgeParameters {
+		if parameter != "" {
+			return fmt.Errorf("hashcat bridge parameters are not permitted for managed tasks")
+		}
+	}
+	if err := h.validateManagedCrackFileReference(string(command.GetMarkovHcstat2()), "crackfile://hcstat2/", "Markov hcstat2"); err != nil {
+		return err
+	}
+	rulesFiles := fields.rulesFilesV7
+	if len(rulesFiles) == 0 && len(command.GetRulesFile()) != 0 {
+		rulesFiles = [][]byte{command.GetRulesFile()}
+	}
+	for _, rulesFile := range rulesFiles {
+		if err := h.validateManagedCrackFileReference(string(rulesFile), "crackfile://rules/", "rules"); err != nil {
+			return err
+		}
+	}
+	customCharsets := []string{command.GetCustomCharset1(), command.GetCustomCharset2(), command.GetCustomCharset3(), command.GetCustomCharset4()}
+	customCharsets = append(customCharsets, fields.customCharsets[:]...)
+	for index, charset := range customCharsets {
+		if charset == "" {
+			continue
+		}
+		if _, err := h.resolveCandidateFileOrInline(charset, fmt.Sprintf("custom charset %d", index+1)); err != nil {
+			return err
+		}
+	}
+	operands := commandAttackOperands(command, fields)
+	roles, err := managedTaskOperandRoles(command.GetAttackMode(), len(operands))
+	if err != nil {
+		return err
+	}
+	for index, operand := range operands {
+		if strings.ContainsRune(operand, '\x00') {
+			return fmt.Errorf("hashcat positional arguments cannot contain NUL bytes")
+		}
+		if roles[index] == attackOperandWordlist && !isManagedWordlistReference(operand) {
+			return fmt.Errorf("attack mode %d operand %d must be a managed crackfile://wordlist/<sha256> reference", command.GetAttackMode(), index+1)
+		}
+		path, managed, err := h.resolveFileReference(operand)
+		if err != nil {
+			return err
+		}
+		if managed {
+			if !isManagedWordlistReference(operand) {
+				return fmt.Errorf("attack mode %d operand %d must use a crackfile://wordlist/ reference", command.GetAttackMode(), index+1)
+			}
+			if path == "" {
+				return fmt.Errorf("attack mode %d operand %d resolved to an empty path", command.GetAttackMode(), index+1)
+			}
+			continue
+		}
+		if err := h.rejectExistingLocalCandidatePath(operand, fmt.Sprintf("attack mode %d mask operand %d", command.GetAttackMode(), index+1), "upload it and use a managed crackfile://wordlist/<sha256> reference"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *Hashcat) validateManagedCrackFileReference(value, prefix, kind string) error {
+	if value == "" {
+		return nil
+	}
+	if !strings.HasPrefix(value, prefix) {
+		return fmt.Errorf("hashcat %s file must use a managed %s reference", kind, prefix)
+	}
+	path, managed, err := h.resolveFileReference(value)
+	if err != nil {
+		return err
+	}
+	if !managed || path == "" {
+		return fmt.Errorf("hashcat %s file did not resolve to a managed path", kind)
+	}
+	return nil
+}
+
+type attackOperandRole uint8
+
+const (
+	attackOperandWordlist attackOperandRole = iota + 1
+	attackOperandMask
+)
+
+func managedTaskOperandRoles(mode clientpb.CrackAttackMode, count int) ([]attackOperandRole, error) {
+	roles := make([]attackOperandRole, count)
+	switch int32(mode) {
+	case 0: // straight: one or more wordlists
+		if count < 1 {
+			return nil, fmt.Errorf("attack mode 0 requires at least one managed wordlist operand")
+		}
+		for index := range roles {
+			roles[index] = attackOperandWordlist
+		}
+	case 1: // combination: exactly two wordlists
+		if count != 2 {
+			return nil, fmt.Errorf("attack mode 1 requires exactly two managed wordlist operands")
+		}
+		for index := range roles {
+			roles[index] = attackOperandWordlist
+		}
+	case 3: // brute force: one hcmask or inline mask
+		if count != 1 {
+			return nil, fmt.Errorf("attack mode 3 requires exactly one mask operand")
+		}
+		roles[0] = attackOperandMask
+	case 6: // one wordlist followed by one mask
+		if count != 2 {
+			return nil, fmt.Errorf("attack mode 6 requires exactly one managed wordlist followed by one mask operand")
+		}
+		roles[0] = attackOperandWordlist
+		roles[1] = attackOperandMask
+	case 7: // one mask followed by one wordlist
+		if count != 2 {
+			return nil, fmt.Errorf("attack mode 7 requires exactly one mask followed by one managed wordlist operand")
+		}
+		roles[0] = attackOperandMask
+		roles[1] = attackOperandWordlist
+	default:
+		return nil, fmt.Errorf("attack mode %d is not supported for distributed cracking", mode)
+	}
+	return roles, nil
+}
+
+func commandAttackOperands(command *clientpb.CrackCommand, fields crackCommandV7Fields) []string {
+	if len(fields.positionalArguments) != 0 {
+		return append([]string(nil), fields.positionalArguments...)
+	}
+	if command.GetIdentify() != "" {
+		// Field 100 predates Hashcat's --identify option and was historically
+		// used as the single positional mask/wordlist argument.
+		return []string{command.GetIdentify()}
+	}
+	return nil
+}
+
+func attackOperandIsMask(mode clientpb.CrackAttackMode, index, count int) bool {
+	switch int32(mode) {
+	case 3:
+		return index == 0
+	case 6:
+		return count > 0 && index == count-1
+	case 7:
+		return index == 0
+	default:
+		return false
+	}
+}
+
+func isManagedWordlistReference(value string) bool {
+	return strings.HasPrefix(value, "crackfile://wordlist/")
+}
+
+func (h *Hashcat) resolveCandidateFileOrInline(value, kind string) (string, error) {
+	if strings.HasPrefix(value, "crackfile://") {
+		// The server currently tracks managed references only in positional,
+		// rules, and hcstat2 fields. Until custom charsets are part of that
+		// ownership graph, accepting one here could let a queued job lose its
+		// backing file before dispatch.
+		return "", fmt.Errorf("%s does not support managed crackfile references; use an inline charset", kind)
+	}
+	if err := h.rejectExistingLocalCandidatePath(value, kind, "use an inline charset instead"); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+func (h *Hashcat) rejectExistingLocalCandidatePath(value, kind, remediation string) error {
+	if unsafeCandidatePath(value) {
+		return fmt.Errorf("%s %q is a crackstation-local, absolute, volume, network, or device path; %s", kind, value, remediation)
+	}
+	return nil
+}
+
+// unsafeCandidatePath recognizes path namespaces using Windows syntax even
+// when validation is running on another OS. In particular, never pass an
+// untrusted UNC/device path to Hashcat: doing so can initiate SMB or WebDAV
+// authentication and can block outside the task's cancellable process.
+func unsafeCandidatePath(value string) bool {
+	if value == "" {
+		return false
+	}
+	if strings.ContainsAny(value, "\x00\r\n") {
+		return true
+	}
+	if value[0] == '/' || value[0] == '\\' {
+		return true
+	}
+	if len(value) >= 2 && value[1] == ':' && ((value[0] >= 'a' && value[0] <= 'z') || (value[0] >= 'A' && value[0] <= 'Z')) {
+		// Reject both drive-absolute (C:\\x) and drive-relative (C:x) paths.
+		return true
+	}
+	for _, component := range strings.FieldsFunc(value, func(r rune) bool { return r == '/' || r == '\\' }) {
+		// Check traversal before execution. Managed Hashcat invocations run in
+		// an isolated directory, and traversal must not escape that boundary.
+		withoutSpaces := strings.TrimRight(component, " ")
+		if withoutSpaces == "." || withoutSpaces == ".." || strings.Trim(withoutSpaces, ".") == "" {
+			return true
+		}
+		deviceName := strings.TrimRight(component, ". ")
+		if deviceName == "" {
+			return true
+		}
+		if index := strings.IndexAny(deviceName, ".:"); index >= 0 {
+			deviceName = deviceName[:index]
+		}
+		upper := strings.ToUpper(deviceName)
+		switch upper {
+		case "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$":
+			return true
+		}
+		if len(upper) == 4 && (strings.HasPrefix(upper, "COM") || strings.HasPrefix(upper, "LPT")) && upper[3] >= '1' && upper[3] <= '9' {
+			return true
+		}
+	}
+	return false
 }

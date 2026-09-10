@@ -70,6 +70,12 @@ func GetRootAppDir() string {
 	} else {
 		dir = value
 	}
+	absoluteDir, err := filepath.Abs(dir)
+	if err != nil {
+		slog.Error("Cannot resolve sliver root dir", "path", dir, "err", err)
+		os.Exit(1)
+	}
+	dir = absoluteDir
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		err = os.MkdirAll(dir, 0700)
 		if err != nil {

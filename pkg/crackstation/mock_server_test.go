@@ -34,6 +34,14 @@ type mockSliverRPC struct {
 	CrackTaskByIDFunc          func(context.Context, *clientpb.CrackTask) (*clientpb.CrackTask, error)
 	CrackTaskUpdateFunc        func(context.Context, *clientpb.CrackTask) (*commonpb.Empty, error)
 	CrackstationBenchmarkFunc  func(context.Context, *clientpb.CrackBenchmark) (*commonpb.Empty, error)
+	CrackstationTriggerFunc    func(context.Context, *clientpb.Event) (*commonpb.Empty, error)
+}
+
+func (m *mockSliverRPC) CrackstationTrigger(ctx context.Context, req *clientpb.Event) (*commonpb.Empty, error) {
+	if m.CrackstationTriggerFunc != nil {
+		return m.CrackstationTriggerFunc(ctx, req)
+	}
+	return &commonpb.Empty{}, nil
 }
 
 func (m *mockSliverRPC) CrackstationRegister(req *clientpb.Crackstation, stream rpcpb.SliverRPC_CrackstationRegisterServer) error {
@@ -136,6 +144,7 @@ func TestSyncFilesDownloadsWordlist(t *testing.T) {
 		Sha2_256:         payloadSHA,
 		UncompressedSize: int64(len(payload)),
 		Type:             clientpb.CrackFileType_WORDLIST,
+		IsCompressed:     true,
 		Chunks: []*clientpb.CrackFileChunk{{
 			ID: "chunk-1",
 			N:  0,
@@ -150,7 +159,7 @@ func TestSyncFilesDownloadsWordlist(t *testing.T) {
 			if req.CrackFileID != crackFile.ID {
 				return nil, status.Errorf(codes.InvalidArgument, "unexpected crack file id: %s", req.CrackFileID)
 			}
-			return &clientpb.CrackFileChunk{ID: req.ID, N: req.N, Data: compressed.Bytes()}, nil
+			return &clientpb.CrackFileChunk{ID: req.ID, CrackFileID: req.CrackFileID, N: req.N, Data: compressed.Bytes()}, nil
 		},
 	}
 
@@ -195,6 +204,7 @@ func TestDownloadCrackFileRejectsBadSHA(t *testing.T) {
 		Sha2_256:         badSHA,
 		UncompressedSize: int64(len(payload)),
 		Type:             clientpb.CrackFileType_RULES,
+		IsCompressed:     true,
 		Chunks: []*clientpb.CrackFileChunk{{
 			ID: "chunk-1",
 			N:  0,
@@ -203,7 +213,7 @@ func TestDownloadCrackFileRejectsBadSHA(t *testing.T) {
 
 	mock := &mockSliverRPC{
 		CrackFileChunkDownloadFunc: func(ctx context.Context, req *clientpb.CrackFileChunk) (*clientpb.CrackFileChunk, error) {
-			return &clientpb.CrackFileChunk{ID: req.ID, N: req.N, Data: compressed.Bytes()}, nil
+			return &clientpb.CrackFileChunk{ID: req.ID, CrackFileID: req.CrackFileID, N: req.N, Data: compressed.Bytes()}, nil
 		},
 	}
 

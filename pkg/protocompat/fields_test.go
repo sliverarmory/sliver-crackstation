@@ -262,3 +262,61 @@ func TestSetMessageBytesListKnownAndUnknown(t *testing.T) {
 		t.Fatalf("unknown repeated message count = %d; want 2", count)
 	}
 }
+
+func TestSetStringsAndBytesListRoundTrip(t *testing.T) {
+	message := &clientpb.CrackCommand{}
+	wantStrings := []string{"crackfile://wordlist/abc", "?d?d"}
+	wantBytes := [][]byte{[]byte("crackfile://rules/def"), {0, 1, 2, 0xff}}
+
+	if err := SetStrings(message, 143, wantStrings); err != nil {
+		t.Fatalf("SetStrings() error = %v", err)
+	}
+	if err := SetBytesList(message, 166, wantBytes); err != nil {
+		t.Fatalf("SetBytesList() error = %v", err)
+	}
+	reader, err := NewReader(message)
+	if err != nil {
+		t.Fatalf("NewReader() error = %v", err)
+	}
+	gotStrings, err := reader.Strings(143)
+	if err != nil || !slices.Equal(gotStrings, wantStrings) {
+		t.Fatalf("Strings(143) = %q, %v; want %q, nil", gotStrings, err, wantStrings)
+	}
+	gotBytes, err := reader.BytesList(166)
+	if err != nil || len(gotBytes) != len(wantBytes) {
+		t.Fatalf("BytesList(166) = %q, %v; want %q, nil", gotBytes, err, wantBytes)
+	}
+	for index := range wantBytes {
+		if !slices.Equal(gotBytes[index], wantBytes[index]) {
+			t.Fatalf("BytesList(166)[%d] = %v; want %v", index, gotBytes[index], wantBytes[index])
+		}
+	}
+
+	// Replacement must remove every prior occurrence while preserving other
+	// unknown fields and the distinction between an empty list and stale data.
+	if err := SetStrings(message, 143, []string{"replacement"}); err != nil {
+		t.Fatalf("SetStrings(replacement) error = %v", err)
+	}
+	if err := SetBytesList(message, 166, nil); err != nil {
+		t.Fatalf("SetBytesList(nil) error = %v", err)
+	}
+	reader, err = NewReader(message)
+	if err != nil {
+		t.Fatalf("NewReader(replacement) error = %v", err)
+	}
+	gotStrings, _ = reader.Strings(143)
+	gotBytes, _ = reader.BytesList(166)
+	if !slices.Equal(gotStrings, []string{"replacement"}) || len(gotBytes) != 0 {
+		t.Fatalf("replacement round trip = %q, %q", gotStrings, gotBytes)
+	}
+}
+
+func TestSetStringsAndBytesListKnownTypeChecks(t *testing.T) {
+	message := &clientpb.CrackCommand{}
+	if err := SetStrings(message, 75, []string{"bad"}); err == nil {
+		t.Fatal("SetStrings() accepted known non-list string field")
+	}
+	if err := SetBytesList(message, 8, [][]byte{[]byte("bad")}); err == nil {
+		t.Fatal("SetBytesList() accepted known singular bytes field")
+	}
+}

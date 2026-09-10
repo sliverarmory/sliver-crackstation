@@ -253,6 +253,7 @@ func runConnectWithOptions(options connectOptions) error {
 	if err := ensureBenchmarks(cracker, options.ForceBenchmark); err != nil {
 		return err
 	}
+	cracker.SetUploadBenchmarkOnConnect(options.ForceBenchmark)
 
 	for _, config := range configs {
 		slog.Info("Subscribing to server", "host", config.LHost, "port", config.LPort)
@@ -266,19 +267,18 @@ func runConnectWithOptions(options connectOptions) error {
 		return nil
 	}
 
-	tui.StartTUI(cracker)
+	if err := tui.StartTUI(cracker); err != nil {
+		return fmt.Errorf("TUI failed: %w", err)
+	}
 	return nil
 }
 
 func ensureBenchmarks(cracker *crackstation.Crackstation, force bool) error {
-	slog.Info("Checking benchmark cache")
 	if !force {
-		if _, err := cracker.LoadBenchmarkResults(); err == nil {
-			return nil
-		}
+		return nil
 	}
 
-	slog.Info("Running hashcat benchmark")
+	slog.Info("Running forced hashcat benchmark")
 	fmt.Printf("Benchmarking system, please wait ... ")
 	if err := cracker.EnsureBenchmark(true); err != nil {
 		fmt.Printf("failure!\n")

@@ -3,6 +3,8 @@ package crackstation
 import (
 	"context"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -17,6 +19,16 @@ import (
 type fakeRPC struct {
 	rpcpb.SliverRPCClient
 	received *clientpb.CrackBenchmark
+}
+
+func TestLoadBenchmarkResultsRejectsEmptyCache(t *testing.T) {
+	station := &Crackstation{dataDir: t.TempDir()}
+	if err := os.WriteFile(filepath.Join(station.dataDir, "benchmark.json"), []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := station.LoadBenchmarkResults(); err == nil {
+		t.Fatal("LoadBenchmarkResults accepted an empty benchmark cache")
+	}
 }
 
 func (f *fakeRPC) CrackstationBenchmark(ctx context.Context, in *clientpb.CrackBenchmark, opts ...grpc.CallOption) (*commonpb.Empty, error) {
