@@ -19,6 +19,7 @@ import (
 	"github.com/sliverarmory/sliver-crackstation/assets"
 	"github.com/sliverarmory/sliver-crackstation/pkg/hashcat"
 	"github.com/sliverarmory/sliver-crackstation/pkg/operatorconfig"
+	"github.com/sliverarmory/sliver-crackstation/pkg/protocompat"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -44,8 +45,15 @@ func TestCrackstationCrackTaskE2E(t *testing.T) {
 
 	assets.Setup(true, false)
 	hashcatInstance := hashcat.NewHashcat(assets.GetHashcatDir())
+	if err := hashcatInstance.BackendInfo(); err != nil {
+		t.Fatalf("failed to enumerate Hashcat backends: %v", err)
+	}
+	if len(hashcatInstance.MetalBackend) == 0 {
+		t.Fatal("Hashcat did not detect a Metal backend")
+	}
+	t.Logf("using Hashcat %s on Metal device %q (Metal %s)", hashcatInstance.Version(), hashcatInstance.MetalBackend[0].GetName(), hashcatInstance.MetalBackend[0].GetMetalVersion())
 
-	plaintext, err := randomLowerString(3)
+	plaintext, err := randomLowerString(8)
 	if err != nil {
 		t.Fatalf("failed to generate plaintext: %v", err)
 	}
@@ -63,13 +71,18 @@ func TestCrackstationCrackTaskE2E(t *testing.T) {
 
 	taskID := uuid.Must(uuid.NewV4())
 	crackCmd := &clientpb.CrackCommand{
-		AttackMode: clientpb.CrackAttackMode_BRUTEFORCE,
-		HashType:   clientpb.HashType_MD5,
-		Hashes:     []string{hashHex},
-		Identify:   "?l?l?l",
-		Potfile:    []byte(potfilePath),
-		Force:      true,
-		Quiet:      true,
+		HashType:            clientpb.HashType_INVALID,
+		Hashes:              []string{hashHex},
+		Potfile:             []byte(potfilePath),
+		BackendIgnoreOpenCL: true,
+		Force:               true,
+		Quiet:               true,
+	}
+	if err := protocompat.SetUint32(crackCmd, 157, 0); err != nil {
+		t.Fatalf("failed to encode Hashcat v7 hash mode: %v", err)
+	}
+	if err := protocompat.SetBytes(crackCmd, 155, []byte(plaintext+"\n")); err != nil {
+		t.Fatalf("failed to encode Hashcat stdin: %v", err)
 	}
 	task := &clientpb.CrackTask{ID: taskID.String(), Command: crackCmd}
 
@@ -140,6 +153,17 @@ done:
 	}
 	if finalUpdate.Err != "" {
 		t.Fatalf("crack task failed: %s", finalUpdate.Err)
+	}
+	resultFields, err := protocompat.NewReader(finalUpdate)
+	if err != nil {
+		t.Fatalf("failed to decode crack task result: %v", err)
+	}
+	exitCode, err := resultFields.Int32(crackTaskExitCodeField)
+	if err != nil {
+		t.Fatalf("failed to decode hashcat exit code: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("hashcat exit code = %d; want 0", exitCode)
 	}
 
 	potfileData, err := os.ReadFile(potfilePath)

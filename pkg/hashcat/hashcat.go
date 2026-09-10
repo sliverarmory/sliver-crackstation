@@ -20,6 +20,8 @@ package hashcat
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -51,48 +53,120 @@ type Hashcat struct {
 	version    string
 
 	CUDABackend   []*clientpb.CUDABackendInfo
+	HIPBackend    []*HIPBackendInfo
 	MetalBackend  []*clientpb.MetalBackendInfo
 	OpenCLBackend []*clientpb.OpenCLBackendInfo
 }
 
+// CommandResult contains the process output result of one Hashcat process. Keeping
+// stderr and the exit code separate lets the crackstation return useful output
+// to Sliver without placing recovered plaintexts or credentials in logs.
+type CommandResult struct {
+	Stdout           []byte
+	Stderr           []byte
+	ExitCode         int32
+	StdoutTruncated  bool
+	StderrTruncated  bool
+	StdoutTotalBytes uint64
+	StderrTotalBytes uint64
+}
+
+// Keep a task result comfortably below gRPC and database limits even for
+// output-oriented modes such as --stdout, --show, and --left. Hashcat is still
+// drained completely so a full pipe cannot deadlock the child process.
+const maxCapturedOutputBytes = 8 << 20
+
 func (h *Hashcat) hashcatCmd(args []string) ([]byte, error) {
-	slog.Debug("Executing hashcat", "exe", h.exe, "args", strings.Join(args, " "))
+	result, err := h.runHashcat(args, nil)
+	return result.Stdout, err
+}
+
+func (h *Hashcat) runHashcat(args []string, stdin []byte) (CommandResult, error) {
+	slog.Debug("Executing hashcat", "exe", h.exe, "args", strings.Join(redactHashcatArgs(args), " "))
 	cmd := exec.Command(h.exe, args...)
 	cmd.Dir = h.cwd
 	cmd.Env = os.Environ()
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if err != nil {
-		slog.Error("Hashcat command failed", "err", err)
-		slog.Debug("Hashcat env dump start")
-		for _, envVar := range cmd.Env {
-			slog.Debug("Hashcat env", "var", envVar)
-		}
-		slog.Debug("Hashcat stdout", "output", stdout.String())
-		slog.Debug("Hashcat stderr", "output", stderr.String())
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
 	}
-	return stdout.Bytes(), err
+	stdout := newLimitedBuffer(maxCapturedOutputBytes)
+	stderr := newLimitedBuffer(maxCapturedOutputBytes)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	err := cmd.Run()
+	result := CommandResult{
+		Stdout:           stdout.Bytes(),
+		Stderr:           stderr.Bytes(),
+		StdoutTruncated:  stdout.Truncated(),
+		StderrTruncated:  stderr.Truncated(),
+		StdoutTotalBytes: stdout.TotalBytes(),
+		StderrTotalBytes: stderr.TotalBytes(),
+	}
+	if err != nil {
+		result.ExitCode = -1
+		var exitError *exec.ExitError
+		if errors.As(err, &exitError) {
+			result.ExitCode = int32(exitError.ExitCode())
+		}
+		slog.Error("Hashcat command failed", "err", err, "exit_code", result.ExitCode, "stdout_bytes", stdout.TotalBytes(), "stderr_bytes", stderr.TotalBytes(), "output_truncated", result.StdoutTruncated || result.StderrTruncated)
+	}
+	return result, err
+}
+
+func redactHashcatArgs(args []string) []string {
+	redacted := append([]string(nil), args...)
+	redactNext := false
+	for index, arg := range redacted {
+		if redactNext {
+			redacted[index] = "<redacted>"
+			redactNext = false
+			continue
+		}
+		if strings.HasPrefix(arg, "--brain-password=") {
+			redacted[index] = "--brain-password=<redacted>"
+			continue
+		}
+		if strings.HasPrefix(arg, "--lookup=") {
+			redacted[index] = "--lookup=<redacted>"
+			continue
+		}
+		if arg == "--brain-password" || arg == "--lookup" {
+			redactNext = true
+		}
+	}
+	return redacted
 }
 
 func (h *Hashcat) BackendInfo() error {
-	rawBackendInfo, err := h.hashcatCmd([]string{"--backend-info"})
+	rawBackendInfo, err := h.hashcatCmd([]string{"--backend-info", "--machine-readable"})
 	if err != nil {
 		return err
 	}
-	lines := strings.Split(string(rawBackendInfo), "\n")
-	for index, line := range lines {
-		switch strings.TrimSpace(line) {
-		case "CUDA Info:":
-			h.parseCUDABackendInfo(index+1, lines)
-		case "Metal Info:":
-			h.parseMetalBackendInfo(index+1, lines)
-		case "OpenCL Info:":
-			h.parseOpenCLBackendInfo(index+1, lines)
-		}
+	cuda, hip, metal, openCL, err := parseMachineReadableBackendInfo(rawBackendInfo)
+	if err != nil {
+		return err
 	}
+	// Hashcat v7.1.2 omits Cache.Size from its JSON formatter even though the
+	// human formatter reports it. Supplement only that missing datum.
+	humanBackendInfo, err := h.hashcatCmd([]string{"--backend-info"})
+	if err != nil {
+		return err
+	}
+	detected := &Hashcat{
+		CUDABackend:   cuda,
+		HIPBackend:    hip,
+		MetalBackend:  metal,
+		OpenCLBackend: openCL,
+	}
+	if err := detected.applyBackendCacheSizes(humanBackendInfo); err != nil {
+		return fmt.Errorf("decode hashcat backend cache sizes: %w", err)
+	}
+	// Replace every backend atomically so a failed probe or disappearing
+	// runtime cannot leave a partially refreshed inventory.
+	h.CUDABackend = detected.CUDABackend
+	h.HIPBackend = detected.HIPBackend
+	h.MetalBackend = detected.MetalBackend
+	h.OpenCLBackend = detected.OpenCLBackend
 	return nil
 }
 

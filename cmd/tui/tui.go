@@ -14,6 +14,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/bishopfox/sliver/protobuf/clientpb"
 	"github.com/sliverarmory/sliver-crackstation/pkg/crackstation"
+	"github.com/sliverarmory/sliver-crackstation/pkg/hashcat"
 )
 
 type viewMode uint
@@ -304,7 +305,7 @@ func (m crackstationModel) devicePageCount() int {
 	if m.crack == nil {
 		return 0
 	}
-	sections := deviceSections(m.crack.ToProtobuf())
+	sections := deviceSections(m.crack.ToProtobuf(), len(m.crack.HIPBackendInfo()))
 	if len(sections) == 0 {
 		return 0
 	}
@@ -412,7 +413,7 @@ func (m crackstationModel) renderDeviceLines() []string {
 	info := m.crack.ToProtobuf()
 	lines := []string{}
 
-	sections := deviceSections(info)
+	sections := deviceSections(info, len(m.crack.HIPBackendInfo()))
 	if len(sections) == 0 {
 		lines = append(lines, "", formatLine("Devices", "none detected"))
 		return lines
@@ -432,6 +433,8 @@ func (m crackstationModel) renderDeviceLines() []string {
 	switch section.kind {
 	case deviceCUDA:
 		lines = append(lines, renderCUDADevices(info.GetCUDA())...)
+	case deviceHIP:
+		lines = append(lines, renderHIPDevices(m.crack.HIPBackendInfo())...)
 	case deviceMetal:
 		lines = append(lines, renderMetalDevices(info.GetMetal())...)
 	case deviceOpenCL:
@@ -809,6 +812,7 @@ type deviceSectionKind int
 
 const (
 	deviceCUDA deviceSectionKind = iota
+	deviceHIP
 	deviceMetal
 	deviceOpenCL
 )
@@ -819,14 +823,15 @@ type deviceSection struct {
 	kind  deviceSectionKind
 }
 
-func deviceSections(info *clientpb.Crackstation) []deviceSection {
+func deviceSections(info *clientpb.Crackstation, hipCount int) []deviceSection {
 	sections := []deviceSection{
 		{label: "CUDA", count: len(info.GetCUDA()), kind: deviceCUDA},
+		{label: "HIP", count: hipCount, kind: deviceHIP},
 		{label: "Metal", count: len(info.GetMetal()), kind: deviceMetal},
 		{label: "OpenCL", count: len(info.GetOpenCL()), kind: deviceOpenCL},
 	}
 
-	primary := []deviceSection{sections[0], sections[1]}
+	primary := []deviceSection{sections[0], sections[1], sections[2]}
 	sort.SliceStable(primary, func(i, j int) bool {
 		if primary[i].count == primary[j].count {
 			return primary[i].label < primary[j].label
@@ -834,7 +839,7 @@ func deviceSections(info *clientpb.Crackstation) []deviceSection {
 		return primary[i].count > primary[j].count
 	})
 
-	ordered := []deviceSection{primary[0], primary[1], sections[2]}
+	ordered := []deviceSection{primary[0], primary[1], primary[2], sections[3]}
 	return ordered
 }
 
@@ -853,6 +858,26 @@ func renderCUDADevices(devices []*clientpb.CUDABackendInfo) []string {
 			lines = appendOptionalClockLine(lines, device.GetClock())
 			lines = appendOptionalLine(lines, "Memory Total", device.GetMemoryTotal())
 			lines = appendOptionalLine(lines, "Memory Free", device.GetMemoryFree())
+			return lines
+		},
+	)
+}
+
+func renderHIPDevices(devices []*hashcat.HIPBackendInfo) []string {
+	return renderDeviceSection(
+		"HIP",
+		len(devices),
+		func(lines []string, index int) []string {
+			device := devices[index]
+			lines = append(lines, formatLine(fmt.Sprintf("HIP %d", index), emptyFallback(device.Name, "unknown")))
+			lines = appendOptionalLine(lines, "Vendor", device.Vendor)
+			lines = appendOptionalLine(lines, "Type", device.Type)
+			lines = appendOptionalLine(lines, "Version", device.Version)
+			lines = appendOptionalLine(lines, "HIP Version", device.HIPVersion)
+			lines = appendOptionalIntLine(lines, "Processors", device.Processors)
+			lines = appendOptionalClockLine(lines, device.Clock)
+			lines = appendOptionalLine(lines, "Memory Total", device.MemoryTotal)
+			lines = appendOptionalLine(lines, "Memory Free", device.MemoryFree)
 			return lines
 		},
 	)

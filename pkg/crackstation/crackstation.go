@@ -38,9 +38,11 @@ import (
 	"github.com/sliverarmory/sliver-crackstation/pkg/hashcat"
 	"github.com/sliverarmory/sliver-crackstation/pkg/hostuuid"
 	"github.com/sliverarmory/sliver-crackstation/pkg/operatorconfig"
+	"github.com/sliverarmory/sliver-crackstation/pkg/protocompat"
 	"github.com/sliverarmory/sliver-crackstation/pkg/transport"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
+	"google.golang.org/protobuf/proto"
 )
 
 var HostUUID string
@@ -107,6 +109,12 @@ type Crackstation struct {
 	roundRobinStop chan struct{}
 }
 
+// HIPBackendInfo returns a snapshot of the locally detected HIP devices. HIP
+// is encoded into the wire-compatible Crackstation protobuf by ToProtobuf.
+func (c *Crackstation) HIPBackendInfo() []*hashcat.HIPBackendInfo {
+	return append([]*hashcat.HIPBackendInfo(nil), c.hashcat.HIPBackend...)
+}
+
 // RoundRobinConnect - Round robin the crackstation across all servers
 func (c *Crackstation) roundRobinConnect(interval time.Duration) {
 	c.roundRobinStop = make(chan struct{})
@@ -130,7 +138,7 @@ func (c *Crackstation) roundRobinConnect(interval time.Duration) {
 }
 
 func (c *Crackstation) ToProtobuf() *clientpb.Crackstation {
-	return &clientpb.Crackstation{
+	station := &clientpb.Crackstation{
 		Name:           c.Name,
 		GOOS:           runtime.GOOS,
 		GOARCH:         runtime.GOARCH,
@@ -140,6 +148,10 @@ func (c *Crackstation) ToProtobuf() *clientpb.Crackstation {
 		OpenCL:         c.hashcat.OpenCLBackend,
 		HostUUID:       HostUUID,
 	}
+	if err := protocompat.SetMessageBytesList(station, 103, c.hashcat.HIPBackendWire()); err != nil {
+		slog.Error("Failed to encode HIP backend information", "err", err)
+	}
+	return station
 }
 
 func (c *Crackstation) Status() *clientpb.CrackstationStatus {
@@ -281,7 +293,14 @@ func (c *Crackstation) handleEvent(server *SliverServer, event *clientpb.Event) 
 		task.StartedAt = time.Now().Unix()
 		server.saveTask(task)
 
-		_, err = c.hashcat.Crack(task.Command)
+		result, crackErr := c.hashcat.CrackWithResult(task.Command)
+		if resultErr := setCrackTaskResult(task, result); resultErr != nil {
+			slog.Error("Error encoding crack task result", "err", resultErr)
+			if crackErr == nil {
+				crackErr = resultErr
+			}
+		}
+		err = crackErr
 		if err != nil {
 			slog.Error("Error running crack task", "err", err)
 			task.Err = err.Error()
@@ -349,19 +368,19 @@ func (c *Crackstation) handleEvent(server *SliverServer, event *clientpb.Event) 
 		if task.Command == nil {
 			task.Err = "missing crack command"
 		} else {
-			cmdCopy := *task.Command
+			cmdCopy := proto.Clone(task.Command).(*clientpb.CrackCommand)
 			cmdCopy.Keyspace = true
 			cmdCopy.Quiet = true
 
 			// If the task depends on wordlists/rules/etc, we may need to sync
 			// those files before hashcat can compute keyspace.
-			keyspaceRaw, err := c.hashcat.Crack(&cmdCopy)
+			keyspaceRaw, err := c.hashcat.Crack(cmdCopy)
 			if err != nil {
 				slog.Info("Keyspace calculation failed; syncing crack files and retrying once", "task_id", task.ID, "err", err)
 				if syncErr := c.SyncFiles(server); syncErr != nil {
 					slog.Error("Keyspace sync failed", "task_id", task.ID, "err", syncErr)
 				}
-				keyspaceRaw, err = c.hashcat.Crack(&cmdCopy)
+				keyspaceRaw, err = c.hashcat.Crack(cmdCopy)
 			}
 
 			if err != nil {

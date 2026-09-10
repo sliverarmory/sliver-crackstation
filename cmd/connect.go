@@ -225,14 +225,20 @@ func runConnectWithOptions(options connectOptions) error {
 	slog.Debug("Hashcat opencl backend", "info", string(openCL))
 	cuda, _ := json.Marshal(hashcatInstance.CUDABackend)
 	slog.Debug("Hashcat cuda backend", "info", string(cuda))
+	hip, _ := json.Marshal(hashcatInstance.HIPBackend)
+	slog.Debug("Hashcat HIP backend", "info", string(hip))
 
-	if len(metal) == 0 && len(openCL) == 0 && len(cuda) == 0 {
+	if len(hashcatInstance.MetalBackend) == 0 &&
+		len(hashcatInstance.OpenCLBackend) == 0 &&
+		len(hashcatInstance.CUDABackend) == 0 &&
+		len(hashcatInstance.HIPBackend) == 0 {
 		fmt.Printf("no devices!\n")
 		return fmt.Errorf("no hashcat devices found")
 	}
 	fmt.Printf("done\n")
 
 	fmt.Printf("   CUDA: %d device(s)\n", len(hashcatInstance.CUDABackend))
+	fmt.Printf("     HIP: %d device(s)\n", len(hashcatInstance.HIPBackend))
 	fmt.Printf(" OpenCL: %d device(s)\n", len(hashcatInstance.OpenCLBackend))
 	fmt.Printf("  Metal: %d device(s)\n", len(hashcatInstance.MetalBackend))
 
