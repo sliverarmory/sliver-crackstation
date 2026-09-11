@@ -58,6 +58,7 @@ const crackKeyspaceEvent = "crack-keyspace"
 const (
 	crackEvent                        = "crack"
 	crackBenchmarkEvent               = "crack-benchmark"
+	crackQueryEvent                   = "crack-query"
 	crackFileUpdateEvent              = "crack-file-updated"
 	crackStatusEvent                  = "crack-status"
 	crackTaskStatusEvent              = "crack-task-status"
@@ -69,6 +70,8 @@ const (
 	defaultSyncRetryMaxDelay          = 30 * time.Second
 	crackBenchmarkSchemaVersionField  = 4
 	crackBenchmarkHashcatVersionField = 5
+	crackstationCapabilitiesField     = 104
+	crackQueryCapability              = "crack-query-v1"
 )
 
 type syncRequestState uint8
@@ -150,6 +153,7 @@ type Crackstation struct {
 	crackLock         *sync.Mutex
 	activityLock      sync.RWMutex
 	isCracking        bool
+	activity          *ActivitySnapshot
 
 	SyncStatus     *clientpb.CrackSyncStatus
 	syncStart      time.Time
@@ -217,7 +221,34 @@ func (c *Crackstation) ToProtobuf() *clientpb.Crackstation {
 	if err := protocompat.SetMessageBytesList(station, 103, c.hashcat.HIPBackendWire()); err != nil {
 		slog.Error("Failed to encode HIP backend information", "err", err)
 	}
+	if err := addCrackstationCapability(station, crackQueryCapability); err != nil {
+		slog.Error("Failed to encode crackstation capability", "capability", crackQueryCapability, "err", err)
+	}
 	return station
+}
+
+func addCrackstationCapability(station *clientpb.Crackstation, capability string) error {
+	reader, err := protocompat.NewReader(station)
+	if err != nil {
+		return err
+	}
+	capabilities, err := reader.Strings(crackstationCapabilitiesField)
+	if err != nil {
+		return err
+	}
+	deduplicated := make([]string, 0, len(capabilities)+1)
+	seen := make(map[string]struct{}, len(capabilities)+1)
+	for _, existing := range append(capabilities, capability) {
+		if existing == "" {
+			continue
+		}
+		if _, duplicate := seen[existing]; duplicate {
+			continue
+		}
+		seen[existing] = struct{}{}
+		deduplicated = append(deduplicated, existing)
+	}
+	return protocompat.SetStrings(station, crackstationCapabilitiesField, deduplicated)
 }
 
 func (c *Crackstation) Status() *clientpb.CrackstationStatus {
@@ -579,17 +610,6 @@ func (c *Crackstation) Stop() {
 	})
 }
 
-func (c *Crackstation) setActivity(active bool, jobID string) {
-	c.activityLock.Lock()
-	c.isCracking = active
-	if active {
-		c.currentCrackJobID = jobID
-	} else {
-		c.currentCrackJobID = ""
-	}
-	c.activityLock.Unlock()
-}
-
 func (c *Crackstation) isActive() bool {
 	c.activityLock.RLock()
 	defer c.activityLock.RUnlock()
@@ -608,13 +628,13 @@ func (c *Crackstation) Benchmark() error {
 }
 
 func (c *Crackstation) benchmarkContext(ctx context.Context) error {
-	benchmarkResults, err := c.hashcat.BenchmarkContext(ctx, &clientpb.CrackCommand{
+	benchmarkResults, err := c.hashcat.BenchmarkContextStreaming(ctx, &clientpb.CrackCommand{
 		AttackMode:     clientpb.CrackAttackMode_NO_ATTACK,
 		HashType:       clientpb.HashType_INVALID,
 		Benchmark:      true,
 		BenchmarkAll:   true,
 		LogfileDisable: true,
-	})
+	}, c.observeBenchmarkProgress)
 	if err != nil {
 		slog.Error("Error running benchmark", "err", err)
 		return err
@@ -691,6 +711,8 @@ func (c *Crackstation) handleEventForConnection(server *SliverServer, event *cli
 		c.runBenchmarkRequestForConnection(server, connectionDone)
 	case crackKeyspaceEvent:
 		c.runKeyspaceTaskForConnection(server, event.Data, connectionDone)
+	case crackQueryEvent:
+		c.runQueryTaskForConnection(server, event.Data, connectionDone)
 	case crackFileUpdateEvent:
 		c.requestSync(server)
 	}

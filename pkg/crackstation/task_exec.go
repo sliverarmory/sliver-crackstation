@@ -102,14 +102,16 @@ func (c *Crackstation) runBenchmarkRequestForConnection(server *SliverServer, co
 	if taskConnectionLost(connectionDone, c.done, connectionLost, cancelTask) {
 		return
 	}
-	c.setActivity(true, "benchmark")
-	defer c.setActivity(false, "")
+	c.beginActivity(ActivitySnapshot{Kind: ActivityBenchmarking, Phase: ActivityPhasePreparing, JobID: "benchmark"})
+	defer c.endActivity()
 
 	// Server-requested benchmarks are always fresh. A cached result is useful
 	// for explicit --force-benchmark startup, but not for recalibrating leases.
 	var results map[int32]uint64
 	var err error
 	for attempt := 1; attempt <= benchmarkMaxAttempts; attempt++ {
+		c.setActivityAttempt(uint32(attempt))
+		c.setActivityPhase(ActivityPhaseBenchmarking)
 		err = c.benchmarkContext(taskContext)
 		if err == nil {
 			results, err = c.LoadBenchmarkResults()
@@ -121,14 +123,18 @@ func (c *Crackstation) runBenchmarkRequestForConnection(server *SliverServer, co
 			return
 		}
 		slog.Warn("Requested benchmark attempt failed", "attempt", attempt, "err", err)
-		if attempt < benchmarkMaxAttempts && !waitBenchmarkRetryContext(taskContext, attempt) {
-			return
+		if attempt < benchmarkMaxAttempts {
+			c.setActivityPhase(ActivityPhaseRetrying)
+			if !waitBenchmarkRetryContext(taskContext, attempt) {
+				return
+			}
 		}
 	}
 	if err != nil {
 		slog.Error("Requested benchmark failed after retries", "err", err)
 		return
 	}
+	c.setActivityPhase(ActivityPhaseUploading)
 	for attempt := 1; attempt <= benchmarkMaxAttempts; attempt++ {
 		if taskConnectionLost(connectionDone, c.done, connectionLost, cancelTask) {
 			return
@@ -141,8 +147,12 @@ func (c *Crackstation) runBenchmarkRequestForConnection(server *SliverServer, co
 			return
 		}
 		slog.Warn("Requested benchmark upload failed", "attempt", attempt, "err", err)
-		if attempt < benchmarkMaxAttempts && !waitBenchmarkRetryContext(taskContext, attempt) {
-			return
+		if attempt < benchmarkMaxAttempts {
+			c.setActivityPhase(ActivityPhaseRetrying)
+			if !waitBenchmarkRetryContext(taskContext, attempt) {
+				return
+			}
+			c.setActivityPhase(ActivityPhaseUploading)
 		}
 	}
 	slog.Error("Requested benchmark upload failed after retries", "err", err)
@@ -191,8 +201,10 @@ func (c *Crackstation) runCrackTaskForConnection(server *SliverServer, taskID []
 		slog.Error("Unable to begin crack task", "err", err)
 		return
 	}
-	c.setActivity(true, taskDisplayID(task, metadata))
-	defer c.setActivity(false, "")
+	activity := activityForTask(ActivityCracking, task, metadata)
+	activity.Phase = ActivityPhaseSynchronizing
+	c.beginActivity(activity)
+	defer c.endActivity()
 	if taskConnectionLost(connectionDone, c.done, connectionLost, cancelTask) {
 		return
 	}
@@ -200,6 +212,7 @@ func (c *Crackstation) runCrackTaskForConnection(server *SliverServer, taskID []
 	heartbeat.Start()
 	defer heartbeat.Stop()
 	syncErr := c.syncFilesForTask(taskContext, server)
+	c.setActivityPhase(ActivityPhasePreparing)
 	if syncErr != nil {
 		slog.Warn("Crack task file synchronization failed; trying verified cache", "task_id", task.GetID(), "err", syncErr)
 	}
@@ -220,7 +233,11 @@ func (c *Crackstation) runCrackTaskForConnection(server *SliverServer, taskID []
 	var resultErr error
 	if err == nil {
 		var result = emptyCommandResult()
-		result, resultErr = c.hashcat.CrackManagedWithResultStreamingContext(taskContext, command, heartbeat.Observe)
+		c.setActivityPhase(ActivityPhaseCracking)
+		result, resultErr = c.hashcat.CrackManagedWithResultStreamingContext(taskContext, command, func(statusJSON []byte) {
+			heartbeat.Observe(statusJSON)
+			c.observeHashcatStatus(statusJSON)
+		})
 		if taskConnectionLost(connectionDone, c.done, connectionLost, cancelTask) {
 			heartbeat.Stop()
 			return
@@ -231,6 +248,7 @@ func (c *Crackstation) runCrackTaskForConnection(server *SliverServer, taskID []
 	} else {
 		resultErr = err
 	}
+	c.setActivityPhase(ActivityPhaseFinalizing)
 	if outfilePath != "" {
 		recoveryErr := c.uploadRecoveredCredentials(
 			taskContext,
@@ -274,8 +292,10 @@ func (c *Crackstation) runKeyspaceTaskForConnection(server *SliverServer, taskID
 		slog.Error("Unable to begin keyspace task", "err", err)
 		return
 	}
-	c.setActivity(true, taskDisplayID(task, metadata))
-	defer c.setActivity(false, "")
+	activity := activityForTask(ActivityKeyspace, task, metadata)
+	activity.Phase = ActivityPhaseSynchronizing
+	c.beginActivity(activity)
+	defer c.endActivity()
 	if taskConnectionLost(connectionDone, c.done, connectionLost, cancelTask) {
 		return
 	}
@@ -283,6 +303,7 @@ func (c *Crackstation) runKeyspaceTaskForConnection(server *SliverServer, taskID
 	heartbeat.Start()
 	defer heartbeat.Stop()
 	syncErr := c.syncFilesForTask(taskContext, server)
+	c.setActivityPhase(ActivityPhasePreparing)
 	if syncErr != nil {
 		slog.Warn("Keyspace task file synchronization failed; trying verified cache", "task_id", task.GetID(), "err", syncErr)
 	}
@@ -323,12 +344,11 @@ func (c *Crackstation) runKeyspaceTaskForConnection(server *SliverServer, taskID
 			resultErr = clearErr
 		} else if validateErr := c.hashcat.ValidateManagedTaskCommand(command); validateErr != nil {
 			if syncErr != nil && errors.Is(validateErr, errManagedCrackFileUnavailable) {
-				slog.Warn("Relinquishing keyspace task until managed files are available", "task_id", task.GetID(), "err", errors.Join(syncErr, validateErr))
-				heartbeat.Stop()
-				return
+				validateErr = errors.Join(syncErr, validateErr)
 			}
 			resultErr = validateErr
 		} else {
+			c.setActivityPhase(ActivityPhaseKeyspace)
 			result, runErr := c.hashcat.CrackManagedWithResultStreamingContext(taskContext, command, nil)
 			if taskConnectionLost(connectionDone, c.done, connectionLost, cancelTask) {
 				heartbeat.Stop()
@@ -348,9 +368,10 @@ func (c *Crackstation) runKeyspaceTaskForConnection(server *SliverServer, taskID
 				}
 				result, runErr = c.hashcat.CrackManagedWithResultStreamingContext(taskContext, command, nil)
 			}
-			if encodeErr := setCrackTaskResult(task, result); encodeErr != nil {
-				runErr = errors.Join(runErr, encodeErr)
-			}
+			resultValidationErr := hashcat.ValidateManagedKeyspaceResult(result)
+			runErr = errors.Join(runErr, resultValidationErr)
+			encodeErr := setCrackTaskResult(task, result)
+			runErr = errors.Join(runErr, encodeErr)
 			if runErr == nil {
 				keyspace, parseErr := parseHashcatKeyspace(result.Stdout)
 				if parseErr != nil {
@@ -359,9 +380,15 @@ func (c *Crackstation) runKeyspaceTaskForConnection(server *SliverServer, taskID
 					runErr = setErr
 				}
 			}
+			if encodeErr == nil && hashcat.IsManagedQueryResultError(runErr) {
+				// Preserve the captured result for the server's compatibility-path
+				// validator, which reports malformed keyspace output as DataLoss.
+				runErr = nil
+			}
 			resultErr = runErr
 		}
 	}
+	c.setActivityPhase(ActivityPhaseFinalizing)
 	if latestErr := setCrackTaskLatestStatus(task, heartbeat.status(), time.Now()); latestErr != nil {
 		resultErr = errors.Join(resultErr, latestErr)
 	}
@@ -539,6 +566,26 @@ func taskDisplayID(task *clientpb.CrackTask, metadata crackTaskMetadata) string 
 		return metadata.CrackJobID
 	}
 	return task.GetID()
+}
+
+func activityForTask(kind ActivityKind, task *clientpb.CrackTask, metadata crackTaskMetadata) ActivitySnapshot {
+	activity := ActivitySnapshot{
+		Kind:       kind,
+		JobID:      taskDisplayID(task, metadata),
+		Attempt:    metadata.Attempt,
+		ShardSkip:  metadata.ShardSkip,
+		ShardLimit: metadata.ShardLimit,
+	}
+	if task == nil || task.Command == nil {
+		return activity
+	}
+	activity.AttackMode = task.Command.GetAttackMode()
+	activity.HashCount = len(task.Command.GetHashes())
+	if hashMode, ok, err := hashcat.EffectiveHashMode(task.Command); err == nil && ok {
+		activity.HashMode = hashMode
+		activity.HasHashMode = true
+	}
+	return activity
 }
 
 func (c *Crackstation) prepareCrackCommand(command *clientpb.CrackCommand, metadata crackTaskMetadata) (*clientpb.CrackCommand, string, error) {

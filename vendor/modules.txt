@@ -7,7 +7,7 @@ charm.land/bubbletea/v2
 # charm.land/lipgloss/v2 v2.0.6
 ## explicit; go 1.25.0
 charm.land/lipgloss/v2
-# github.com/bishopfox/sliver v1.7.8-0.20260904182742-c3e8a97f66e1
+# github.com/bishopfox/sliver v1.7.8-0.20260911222259-4ef33f389ced
 ## explicit; go 1.27.1
 github.com/bishopfox/sliver/protobuf/clientpb
 github.com/bishopfox/sliver/protobuf/commonpb

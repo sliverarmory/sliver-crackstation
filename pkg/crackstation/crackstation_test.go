@@ -11,14 +11,69 @@ import (
 	"github.com/bishopfox/sliver/protobuf/clientpb"
 	"github.com/bishopfox/sliver/protobuf/commonpb"
 	"github.com/bishopfox/sliver/protobuf/rpcpb"
+	"github.com/sliverarmory/sliver-crackstation/pkg/hashcat"
+	"github.com/sliverarmory/sliver-crackstation/pkg/protocompat"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/test/bufconn"
+	"google.golang.org/protobuf/proto"
 )
 
 type fakeRPC struct {
 	rpcpb.SliverRPCClient
 	received *clientpb.CrackBenchmark
+}
+
+func TestToProtobufAdvertisesCrackQueryCapability(t *testing.T) {
+	registration := (&Crackstation{hashcat: &hashcat.Hashcat{}}).ToProtobuf()
+	wire, err := proto.Marshal(registration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded := &clientpb.Crackstation{}
+	if err := proto.Unmarshal(wire, decoded); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := protocompat.NewReader(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilities, err := reader.Strings(crackstationCapabilitiesField)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(capabilities) != 1 || capabilities[0] != crackQueryCapability {
+		t.Fatalf("capabilities = %q; want [%q]", capabilities, crackQueryCapability)
+	}
+}
+
+func TestAddCrackstationCapabilityDeduplicatesAndPreservesUnknownFields(t *testing.T) {
+	registration := &clientpb.Crackstation{}
+	if err := protocompat.SetStrings(registration, crackstationCapabilitiesField, []string{"existing", crackQueryCapability, crackQueryCapability}); err != nil {
+		t.Fatal(err)
+	}
+	const preservedField = 105
+	if err := protocompat.SetString(registration, preservedField, "preserve-me"); err != nil {
+		t.Fatal(err)
+	}
+	if err := addCrackstationCapability(registration, crackQueryCapability); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := protocompat.NewReader(registration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capabilities, err := reader.Strings(crackstationCapabilitiesField)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(capabilities) != 2 || capabilities[0] != "existing" || capabilities[1] != crackQueryCapability {
+		t.Fatalf("capabilities = %q; want existing capability followed by %q", capabilities, crackQueryCapability)
+	}
+	preserved, err := reader.String(preservedField)
+	if err != nil || preserved != "preserve-me" {
+		t.Fatalf("preserved unknown field = %q, %v", preserved, err)
+	}
 }
 
 func TestLoadBenchmarkResultsRejectsEmptyCache(t *testing.T) {

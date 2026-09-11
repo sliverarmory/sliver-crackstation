@@ -56,14 +56,23 @@ printf '%s\n' '{"status":4,"devices":[{"temp":72}]}' 'diagnostic' >&2
 }
 
 func TestCaptureHashcatStreamBoundsStatusFramesAndKeepsDraining(t *testing.T) {
+	ordinary := []byte(`* Hash-Mode 1000 (NTLM)`)
 	oversized := []byte(`{"status":3,"padding":"` + strings.Repeat("x", maxHashcatStatusBytes) + `"}`)
 	valid := []byte(`{"status":4,"devices":[{"temp":72}]}`)
-	input := append(append(append([]byte(nil), oversized...), '\n'), valid...)
+	trailing := []byte(`Speed.#1.........: 42 H/s`)
+	input := append(append([]byte(nil), ordinary...), '\n')
+	input = append(input, oversized...)
 	input = append(input, '\n')
+	input = append(input, valid...)
+	input = append(input, '\n')
+	input = append(input, trailing...)
 	var output bytes.Buffer
 	var statuses [][]byte
-	if err := captureHashcatStream(bytes.NewReader(input), &output, func(status []byte) {
+	var lines [][]byte
+	if err := captureHashcatStreamObserved(bytes.NewReader(input), &output, func(status []byte) {
 		statuses = append(statuses, append([]byte(nil), status...))
+	}, func(line []byte) {
+		lines = append(lines, append([]byte(nil), line...))
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -72,6 +81,34 @@ func TestCaptureHashcatStreamBoundsStatusFramesAndKeepsDraining(t *testing.T) {
 	}
 	if len(statuses) != 1 || !bytes.Equal(statuses[0], valid) {
 		t.Fatalf("status callbacks = %q; want only the bounded trailing frame", statuses)
+	}
+	wantLines := [][]byte{ordinary, valid, trailing}
+	if !slices.EqualFunc(lines, wantLines, bytes.Equal) {
+		t.Fatalf("line callbacks = %q; want bounded complete lines %q", lines, wantLines)
+	}
+}
+
+func TestRunHashcatStreamingObservesOnlyStdoutLines(t *testing.T) {
+	h := testHashcatScript(t, `
+printf '%s\n' '* Hash-Mode 1000 (NTLM)'
+printf '%s\n' '* Hash-Mode 99999 (stderr decoy)' '{"status":3,"devices":[{"temp":73}]}' >&2
+`)
+	var statuses []string
+	var lines []string
+	_, err := h.runHashcatStreamingObserved(context.Background(), nil, nil, func(status []byte) {
+		statuses = append(statuses, string(status))
+	}, func(line []byte) {
+		lines = append(lines, string(line))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(statuses) != 1 || !strings.Contains(statuses[0], `"temp":73`) {
+		t.Fatalf("status callbacks = %q; stderr JSON status must still be forwarded", statuses)
+	}
+	wantLines := []string{"* Hash-Mode 1000 (NTLM)"}
+	if !slices.Equal(lines, wantLines) {
+		t.Fatalf("line callbacks = %q; want stdout only %q", lines, wantLines)
 	}
 }
 
@@ -628,7 +665,9 @@ func TestValidateManagedTaskCommandRejectsDistributedControlModes(t *testing.T) 
 		{name: "v7 brain server timer presence", mutate: setUint32(crackFieldBrainServerTimerV7, 0)},
 		{name: "v7 brain client features", mutate: setUint32(crackFieldBrainClientFeaturesV7, 1)},
 		{name: "v7 brain session presence", mutate: setUint32(crackFieldBrainSessionV7, 0)},
-		{name: "v7 brain whitelist", mutate: setUint32(crackFieldBrainWhitelistV7, 1)},
+		{name: "v7 brain whitelist", mutate: direct(func(command *clientpb.CrackCommand) {
+			command.BrainSessionWhitelistV7 = []uint32{1}
+		})},
 		{name: "v7 brain password", mutate: setString(crackFieldBrainPasswordV7, "secret")},
 		{name: "encrypted output", mutate: setString(crackFieldEncryptWithPubkey, "public-key")},
 		{name: "seek database", mutate: setString(crackFieldSeekDBPath, "/tmp/seekdb")},

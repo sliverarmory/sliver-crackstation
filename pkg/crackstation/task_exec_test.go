@@ -494,6 +494,41 @@ func TestRunKeyspaceTaskStoresUint64ValueAndClearsRange(t *testing.T) {
 	}
 }
 
+func TestRunKeyspaceTaskCompletesInvalidProcessResultForServerValidation(t *testing.T) {
+	h := newScriptHashcat(t, "printf '42\\n'; exit 1")
+	task, _ := leasedTask(t, &clientpb.CrackCommand{
+		AttackMode: clientpb.CrackAttackMode_BRUTEFORCE,
+		Identify:   "?d",
+	}, crackTaskKindKeyspace, 0, 0)
+	capture := &taskCapture{}
+	server := taskServer(t, task, capture)
+	station, err := NewCrackstation("worker", t.TempDir(), h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	station.runKeyspaceTask(server, assignmentData(t, task))
+
+	updates, _ := capture.snapshot()
+	final := updates[len(updates)-1]
+	metadata, err := readCrackTaskMetadata(final)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadata.State != crackTaskStateCompleted || final.GetErr() != "" {
+		t.Fatalf("state=%v error=%q; want completed result for authoritative server validation", metadata.State, final.GetErr())
+	}
+	reader, err := protocompat.NewReader(final)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyspace, _ := reader.String(crackTaskKeyspaceField)
+	stdout, _ := reader.Bytes(crackTaskStdoutField)
+	exitCode, _ := reader.Int32(crackTaskExitCodeField)
+	if keyspace != "" || string(stdout) != "42\n" || exitCode != 1 {
+		t.Fatalf("keyspace=%q stdout=%q exit=%d; want empty keyspace and preserved process result", keyspace, stdout, exitCode)
+	}
+}
+
 func TestReadRecoveredCredentialsPreservesSaltedHashesAndPlaintextBytes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "outfile")
 	data := []byte("hash:salt:70613a73733a1f\nempty:\nbinary:000a1fff\n")
@@ -1172,19 +1207,34 @@ if [ "$keyspace" = true ]; then printf '1\n'; else : > "$outfile"; fi
 	}
 }
 
-func TestMissingManagedFileAfterSyncOutageRelinquishesTask(t *testing.T) {
-	for _, kind := range []crackTaskKind{crackTaskKindCrack, crackTaskKindKeyspace} {
-		t.Run(fmt.Sprintf("kind-%d", kind), func(t *testing.T) {
+func TestMissingManagedFileAfterSyncOutageHandlesTaskLifecycle(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		kind         crackTaskKind
+		wantTerminal bool
+	}{
+		{name: "durable crack relinquishes", kind: crackTaskKindCrack},
+		{name: "standalone keyspace fails", kind: crackTaskKindKeyspace, wantTerminal: true},
+		{name: "standalone query fails", kind: crackTaskKindQuery, wantTerminal: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			digest := strings.Repeat("a", 64)
 			command := &clientpb.CrackCommand{
 				AttackMode: clientpb.CrackAttackMode_STRAIGHT,
-				Hashes:     []string{"hash"},
 				Identify:   "crackfile://wordlist/" + digest,
 			}
-			task, _ := leasedTask(t, command, kind, 0, 1)
+			if test.kind == crackTaskKindCrack {
+				command.Hashes = []string{"hash"}
+			}
+			if test.kind == crackTaskKindQuery {
+				if err := protocompat.SetBool(command, queryTotalCandidatesField, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			task, _ := leasedTask(t, command, test.kind, 0, 1)
 			var updateCalls atomic.Int32
-			var finalCalls atomic.Int32
 			var listCalls atomic.Int32
+			var final *clientpb.CrackTask
 			mock := &mockSliverRPC{
 				CrackTaskByIDFunc: func(context.Context, *clientpb.CrackTask) (*clientpb.CrackTask, error) {
 					return proto.Clone(task).(*clientpb.CrackTask), nil
@@ -1192,7 +1242,7 @@ func TestMissingManagedFileAfterSyncOutageRelinquishesTask(t *testing.T) {
 				CrackTaskUpdateFunc: func(_ context.Context, update *clientpb.CrackTask) (*commonpb.Empty, error) {
 					updateCalls.Add(1)
 					if update.GetCompletedAt() != 0 {
-						finalCalls.Add(1)
+						final = proto.Clone(update).(*clientpb.CrackTask)
 					}
 					return &commonpb.Empty{}, nil
 				},
@@ -1209,16 +1259,32 @@ func TestMissingManagedFileAfterSyncOutageRelinquishesTask(t *testing.T) {
 				t.Fatal(err)
 			}
 			server := &SliverServer{rpc: newBufConnClient(t, mock)}
-			if kind == crackTaskKindCrack {
+			switch test.kind {
+			case crackTaskKindCrack:
 				station.runCrackTask(server, assignmentData(t, task))
-			} else {
+			case crackTaskKindKeyspace:
 				station.runKeyspaceTask(server, assignmentData(t, task))
+			case crackTaskKindQuery:
+				station.runQueryTask(server, assignmentData(t, task))
 			}
 			if listCalls.Load() != benchmarkMaxAttempts {
 				t.Fatalf("sync attempts = %d; want %d", listCalls.Load(), benchmarkMaxAttempts)
 			}
-			if updateCalls.Load() != 1 || finalCalls.Load() != 0 {
-				t.Fatalf("updates=%d final=%d; unavailable infrastructure must leave running lease to requeue", updateCalls.Load(), finalCalls.Load())
+			if !test.wantTerminal {
+				if updateCalls.Load() != 1 || final != nil {
+					t.Fatalf("updates=%d final=%v; durable task must leave its running lease to requeue", updateCalls.Load(), final != nil)
+				}
+				return
+			}
+			if updateCalls.Load() != 2 || final == nil {
+				t.Fatalf("updates=%d final=%v; standalone task must report terminal failure", updateCalls.Load(), final != nil)
+			}
+			metadata, err := readCrackTaskMetadata(final)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if metadata.State != crackTaskStateFailed || !strings.Contains(final.GetErr(), "persistent sync outage") || !strings.Contains(final.GetErr(), errManagedCrackFileUnavailable.Error()) {
+				t.Fatalf("state=%v error=%q; want joined synchronization and managed-file failure", metadata.State, final.GetErr())
 			}
 		})
 	}

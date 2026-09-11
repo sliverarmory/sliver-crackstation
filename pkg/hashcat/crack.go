@@ -56,6 +56,15 @@ func (h *Hashcat) CrackWithResultStreaming(cmd *clientpb.CrackCommand, onStatus 
 
 // CrackWithResultStreamingContext is the context-aware streaming entrypoint.
 func (h *Hashcat) CrackWithResultStreamingContext(ctx context.Context, cmd *clientpb.CrackCommand, onStatus func([]byte)) (CommandResult, error) {
+	return h.crackWithResultStreamingContextObserved(ctx, cmd, onStatus, nil)
+}
+
+func (h *Hashcat) crackWithResultStreamingContextObserved(
+	ctx context.Context,
+	cmd *clientpb.CrackCommand,
+	onStatus func([]byte),
+	onLine func([]byte),
+) (CommandResult, error) {
 	if cmd == nil {
 		return CommandResult{ExitCode: -1}, fmt.Errorf("missing crack command")
 	}
@@ -72,7 +81,7 @@ func (h *Hashcat) CrackWithResultStreamingContext(ctx context.Context, cmd *clie
 	if err != nil {
 		return CommandResult{ExitCode: -1}, err
 	}
-	return h.runHashcatStreaming(ctx, args, v7Fields.stdin, onStatus)
+	return h.runHashcatStreamingObserved(ctx, args, v7Fields.stdin, onStatus, onLine)
 }
 
 // CrackManagedWithResultStreamingContext executes a server-owned queue task in

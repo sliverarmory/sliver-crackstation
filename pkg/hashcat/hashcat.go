@@ -111,7 +111,21 @@ func (h *Hashcat) runHashcatStreaming(
 	stdin []byte,
 	onStatus func([]byte),
 ) (CommandResult, error) {
-	return h.runHashcatStreamingInDirectory(ctx, args, stdin, onStatus, h.cwd)
+	return h.runHashcatStreamingObserved(ctx, args, stdin, onStatus, nil)
+}
+
+// runHashcatStreamingObserved is the internal streaming entrypoint for callers
+// which also need Hashcat's ordinary, line-oriented stdout as it arrives. Lines
+// larger than maxHashcatStatusBytes are still drained into the bounded command
+// result, but are deliberately not exposed to callbacks.
+func (h *Hashcat) runHashcatStreamingObserved(
+	ctx context.Context,
+	args []string,
+	stdin []byte,
+	onStatus func([]byte),
+	onLine func([]byte),
+) (CommandResult, error) {
+	return h.runHashcatStreamingInDirectoryObserved(ctx, args, stdin, onStatus, onLine, h.cwd)
 }
 
 func (h *Hashcat) runHashcatStreamingInDirectory(
@@ -119,6 +133,17 @@ func (h *Hashcat) runHashcatStreamingInDirectory(
 	args []string,
 	stdin []byte,
 	onStatus func([]byte),
+	workingDirectory string,
+) (CommandResult, error) {
+	return h.runHashcatStreamingInDirectoryObserved(ctx, args, stdin, onStatus, nil, workingDirectory)
+}
+
+func (h *Hashcat) runHashcatStreamingInDirectoryObserved(
+	ctx context.Context,
+	args []string,
+	stdin []byte,
+	onStatus func([]byte),
+	onLine func([]byte),
 	workingDirectory string,
 ) (CommandResult, error) {
 	slog.Debug("Executing hashcat", "exe", h.exe, "args", strings.Join(redactHashcatArgs(args), " "))
@@ -151,16 +176,24 @@ func (h *Hashcat) runHashcatStreamingInDirectory(
 		onStatus(statusJSON)
 		callbackMu.Unlock()
 	}
+	var forwardLine func([]byte)
+	if onLine != nil {
+		forwardLine = func(line []byte) {
+			callbackMu.Lock()
+			onLine(line)
+			callbackMu.Unlock()
+		}
+	}
 	readErrors := make(chan error, 2)
 	var readers sync.WaitGroup
 	readers.Add(2)
 	go func() {
 		defer readers.Done()
-		readErrors <- captureHashcatStream(stdoutPipe, stdout, forwardStatus)
+		readErrors <- captureHashcatStreamObserved(stdoutPipe, stdout, forwardStatus, forwardLine)
 	}()
 	go func() {
 		defer readers.Done()
-		readErrors <- captureHashcatStream(stderrPipe, stderr, forwardStatus)
+		readErrors <- captureHashcatStreamObserved(stderrPipe, stderr, forwardStatus, nil)
 	}()
 
 	readers.Wait()
@@ -200,6 +233,10 @@ func (h *Hashcat) runHashcatStreamingInDirectory(
 }
 
 func captureHashcatStream(reader io.Reader, output io.Writer, onStatus func([]byte)) error {
+	return captureHashcatStreamObserved(reader, output, onStatus, nil)
+}
+
+func captureHashcatStreamObserved(reader io.Reader, output io.Writer, onStatus func([]byte), onLine func([]byte)) error {
 	buffered := bufio.NewReaderSize(reader, 64<<10)
 	statusLine := make([]byte, 0, 64<<10)
 	statusLineTooLarge := false
@@ -223,8 +260,13 @@ func captureHashcatStream(reader io.Reader, output io.Writer, onStatus func([]by
 		}
 		if !statusLineTooLarge && len(statusLine) != 0 {
 			trimmed := bytes.TrimSpace(statusLine)
-			if isHashcatStatusJSON(trimmed) {
+			if onStatus != nil && isHashcatStatusJSON(trimmed) {
 				onStatus(append([]byte(nil), trimmed...))
+			}
+			if onLine != nil {
+				line := bytes.TrimSuffix(statusLine, []byte{'\n'})
+				line = bytes.TrimSuffix(line, []byte{'\r'})
+				onLine(append([]byte(nil), line...))
 			}
 		}
 		statusLine = statusLine[:0]

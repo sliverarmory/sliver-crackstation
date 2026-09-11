@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/signal"
 	"sort"
@@ -16,6 +17,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/bishopfox/sliver/protobuf/clientpb"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/sliverarmory/sliver-crackstation/pkg/crackstation"
 	"github.com/sliverarmory/sliver-crackstation/pkg/hashcat"
 )
@@ -89,6 +91,7 @@ type statusMsg *clientpb.CrackstationStatus
 type crackstationModel struct {
 	crack       *crackstation.Crackstation
 	status      *clientpb.CrackstationStatus
+	activity    *crackstation.ActivitySnapshot
 	statusSub   chan *clientpb.CrackstationStatus
 	lastUpdate  time.Time
 	spinner     spinner.Model
@@ -182,9 +185,8 @@ func newModel(crack *crackstation.Crackstation, statusSub chan *clientpb.Crackst
 	if crack != nil {
 		benchmarks, benchErr = crack.LoadBenchmarkResults()
 	}
-	return crackstationModel{
+	model := crackstationModel{
 		crack:      crack,
-		status:     crack.Status(),
 		statusSub:  statusSub,
 		lastUpdate: time.Now(),
 		spinner:    spin,
@@ -192,6 +194,11 @@ func newModel(crack *crackstation.Crackstation, statusSub chan *clientpb.Crackst
 		benchmarks: benchmarks,
 		benchErr:   benchErr,
 	}
+	if crack != nil {
+		model.status = crack.Status()
+		model.activity = crack.Activity()
+	}
+	return model
 }
 
 func (m crackstationModel) Init() tea.Cmd {
@@ -266,11 +273,30 @@ func (m crackstationModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinner, cmd = m.spinner.Update(msg)
 		return m, cmd
 	case statusMsg:
+		previousActivity := m.activity
 		m.status = (*clientpb.CrackstationStatus)(msg)
+		if m.crack != nil {
+			m.activity = m.crack.Activity()
+		}
+		if benchmarkActivityEnded(previousActivity, m.activity) && m.crack != nil {
+			benchmarks, err := m.crack.LoadBenchmarkResults()
+			if err == nil {
+				m.benchmarks = benchmarks
+				m.benchErr = nil
+				m.benchPage = 0
+			} else if len(m.benchmarks) == 0 {
+				m.benchErr = err
+			}
+		}
 		m.lastUpdate = time.Now()
 		return m, waitForStatus(m.statusSub)
 	}
 	return m, nil
+}
+
+func benchmarkActivityEnded(previous, current *crackstation.ActivitySnapshot) bool {
+	return previous != nil && previous.Kind == crackstation.ActivityBenchmarking &&
+		(current == nil || current.Kind != crackstation.ActivityBenchmarking)
 }
 
 func (m crackstationModel) View() tea.View {
@@ -286,7 +312,7 @@ func (m crackstationModel) View() tea.View {
 func (m crackstationModel) renderMainView() string {
 	header := m.renderHeader()
 	body := m.renderBody()
-	footer := helpStyle.Render(m.footerText())
+	footer := helpStyle.Render(ansi.Truncate(m.footerText(), m.terminalWidth(), "…"))
 	return strings.Join([]string{header, body, footer}, "\n\n")
 }
 
@@ -329,8 +355,12 @@ func (m crackstationModel) renderHeader() string {
 
 	title := headerTitleStyle.Render("Sliver Crackstation Monitor")
 	meta := m.renderGRPCStatus()
-	headerLine := strings.TrimSpace(strings.Join([]string{title, activity, stateBadge, meta}, "  "))
-	tabs := m.renderTabs()
+	available := m.terminalWidth() - 2
+	if available < 1 {
+		available = 1
+	}
+	headerLine := ansi.Truncate(strings.TrimSpace(strings.Join([]string{title, activity, stateBadge, meta}, "  ")), available, "…")
+	tabs := ansi.Truncate(m.renderTabs(), available, "…")
 	return headerStyle.Render(strings.Join([]string{headerLine, "", tabs}, "\n"))
 }
 
@@ -409,29 +439,52 @@ func (m crackstationModel) renderTabs() string {
 func (m crackstationModel) renderBody() string {
 	if m.view == viewDevices {
 		lines := m.renderDeviceLines()
-		return boxStyle.Width(m.contentWidth()).Render(strings.Join(lines, "\n"))
+		return m.renderBox(lines)
 	}
 	if m.view == viewHost {
 		lines := m.renderHostLines()
-		return boxStyle.Width(m.contentWidth()).Render(strings.Join(lines, "\n"))
+		return m.renderBox(lines)
 	}
 	if m.view == viewBenchmarks {
 		lines := m.renderBenchmarkLines()
-		return boxStyle.Width(m.contentWidth()).Render(strings.Join(lines, "\n"))
+		return m.renderBox(lines)
 	}
 
 	if m.status == nil {
 		return boxStyle.Render("Waiting for status updates ...")
 	}
 
-	lines := m.renderSummaryLines()
-	detailLines := m.renderDetailLines()
-	if len(detailLines) > 0 {
+	var lines []string
+	if m.activity != nil {
+		// Put live work first so the useful telemetry remains visible even in a
+		// short terminal. The static host summary is still available below and
+		// in the Host tab.
+		lines = m.renderDetailLines()
 		lines = append(lines, "")
-		lines = append(lines, detailLines...)
+		lines = append(lines, m.renderActiveHostLine(time.Now()))
+	} else {
+		lines = m.renderSummaryLines()
+		detailLines := m.renderDetailLines()
+		if len(detailLines) > 0 {
+			lines = append(lines, "")
+			lines = append(lines, detailLines...)
+		}
 	}
 
-	return boxStyle.Width(m.contentWidth()).Render(strings.Join(lines, "\n"))
+	return m.renderBox(lines)
+}
+
+func (m crackstationModel) renderActiveHostLine(now time.Time) string {
+	age := now.Sub(m.lastUpdate)
+	if age < 0 {
+		age = 0
+	}
+	return formatLine("Host", fmt.Sprintf("%s | %s | %d servers | update %s ago",
+		emptyFallback(m.status.GetName(), "unknown"),
+		m.status.GetState().String(),
+		countServers(m.crack),
+		humanizeDuration(age),
+	))
 }
 
 func (m crackstationModel) renderSummaryLines() []string {
@@ -565,13 +618,17 @@ func (m crackstationModel) renderBenchmarkLines() []string {
 }
 
 func (m crackstationModel) renderDetailLines() []string {
+	lines := m.renderActivityLines(time.Now())
 	if m.status == nil || !m.status.GetIsSyncing() || m.status.GetSyncing() == nil {
-		return nil
+		return lines
 	}
 
+	if len(lines) > 0 {
+		lines = append(lines, "")
+	}
 	progress := m.status.GetSyncing().GetProgress()
 	if len(progress) == 0 {
-		return []string{formatLine("Sync Progress", "No file progress reported")}
+		return append(lines, formatLine("Sync Progress", "No file progress reported"))
 	}
 
 	keys := make([]string, 0, len(progress))
@@ -580,7 +637,8 @@ func (m crackstationModel) renderDetailLines() []string {
 	}
 	sort.Strings(keys)
 
-	lines := []string{formatLine("Sync Progress", fmt.Sprintf("%d files", len(keys)))}
+	lines = append(lines, titleStyle.Render("File Synchronization"))
+	lines = append(lines, formatLine("Sync Progress", fmt.Sprintf("%d files", len(keys))))
 	maxLines := 6
 	for i, key := range keys {
 		if i >= maxLines {
@@ -592,11 +650,282 @@ func (m crackstationModel) renderDetailLines() []string {
 	return lines
 }
 
-func (m crackstationModel) contentWidth() int {
+func (m crackstationModel) renderActivityLines(now time.Time) []string {
+	activity := m.activity
+	if activity == nil {
+		return nil
+	}
+
+	lines := []string{titleStyle.Render("Running Job")}
+	jobDetails := []string{activity.Kind.String()}
+	if activity.JobID != "" {
+		jobDetails = append(jobDetails, activity.JobID)
+	}
+	if !activity.StartedAt.IsZero() {
+		elapsed := now.Sub(activity.StartedAt)
+		if elapsed < 0 {
+			elapsed = 0
+		}
+		jobDetails = append(jobDetails, "elapsed "+humanizeDuration(elapsed))
+	}
+	if activity.Attempt > 1 {
+		jobDetails = append(jobDetails, fmt.Sprintf("attempt %d", activity.Attempt))
+	}
+	if phase := activity.Phase.String(); phase != "" {
+		jobDetails = append(jobDetails, phase)
+	}
+	lines = append(lines, formatLine("Job", strings.Join(jobDetails, " | ")))
+
+	switch activity.Kind {
+	case crackstation.ActivityBenchmarking:
+		return append(lines, renderBenchmarkActivity(activity.BenchmarkProgress)...)
+	case crackstation.ActivityCracking:
+		return append(lines, m.renderCrackActivity(activity, now)...)
+	case crackstation.ActivityKeyspace:
+		return append(lines,
+			formatLine("Work", activityWorkDescription(activity)),
+			formatLine("Keyspace", "calculating candidate count; live rate and hardware metrics are not emitted for this probe"),
+		)
+	default:
+		return lines
+	}
+}
+
+func (m crackstationModel) renderCrackActivity(activity *crackstation.ActivitySnapshot, now time.Time) []string {
+	lines := []string{formatLine("Work", activityWorkDescription(activity))}
+	if activity.ShardSkip > 0 || activity.ShardLimit > 0 {
+		lines = append(lines, formatLine("Shard", fmt.Sprintf("skip %s, limit %s", humanizeCount(activity.ShardSkip), humanizeCount(activity.ShardLimit))))
+	}
+
+	status := activity.HashcatStatus
+	if status == nil {
+		return append(lines, formatLine("Hashcat", "waiting for first status sample"))
+	}
+	hashcatDetails := []string{status.StateName()}
+	if status.Progress.Total > 0 {
+		percent := float64(status.Progress.Current) / float64(status.Progress.Total) * 100
+		if percent > 100 {
+			percent = 100
+		}
+		hashcatDetails = append(hashcatDetails, fmt.Sprintf("%.2f%% (%s / %s)", percent, humanizeCount(status.Progress.Current), humanizeCount(status.Progress.Total)))
+	}
+	if !activity.TelemetryAt.IsZero() {
+		age := now.Sub(activity.TelemetryAt)
+		if age < 0 {
+			age = 0
+		}
+		if age >= 3*time.Second {
+			hashcatDetails = append(hashcatDetails, "telemetry "+humanizeDuration(age)+" old")
+		}
+	}
+	lines = append(lines, formatLine("Hashcat", strings.Join(hashcatDetails, " | ")))
+	performance := []string{}
+	if speed := status.TotalSpeed(); speed > 0 {
+		performance = append(performance, humanizeHashRate(speed))
+	} else if len(status.Devices) == 0 {
+		performance = append(performance, "waiting for device metrics")
+	} else {
+		performance = append(performance, "measuring...")
+	}
+	if eta, ok := statusETA(status, now); ok {
+		performance = append(performance, fmt.Sprintf("ETA %s (%s)", humanizeDuration(eta.Sub(now)), eta.Format("15:04:05")))
+	}
+	lines = append(lines, formatLine("Performance", strings.Join(performance, " | ")))
+	results := []string{}
+	if status.RecoveredHashes.Total > 0 {
+		results = append(results, fmt.Sprintf("%d/%d hashes, %d/%d salts",
+			status.RecoveredHashes.Current,
+			status.RecoveredHashes.Total,
+			status.RecoveredSalts.Current,
+			status.RecoveredSalts.Total,
+		))
+	}
+	results = append(results, humanizeCount(status.Rejected)+" rejected")
+	lines = append(lines, formatLine("Results", strings.Join(results, " | ")))
+
+	if len(status.Devices) > 0 && !hasHardwareMetrics(status.Devices) {
+		lines = append(lines, formatLine("Hardware", "temperature/utilization unavailable"))
+	}
+	deviceLimit := len(status.Devices)
+	if deviceLimit > 4 {
+		deviceLimit = 4
+	}
+	for _, device := range status.Devices[:deviceLimit] {
+		lines = append(lines, renderActiveDevice(device)...)
+	}
+	if remaining := len(status.Devices) - deviceLimit; remaining > 0 {
+		lines = append(lines, formatLine("Devices", fmt.Sprintf("%d more", remaining)))
+	}
+	return lines
+}
+
+func activityWorkDescription(activity *crackstation.ActivitySnapshot) string {
+	work := []string{}
+	if activity.HasHashMode {
+		work = append(work, fmt.Sprintf("%s (%d)", hashTypeLabel(activity.HashMode), activity.HashMode))
+	}
+	work = append(work, attackModeLabel(activity.AttackMode))
+	if activity.HashCount > 0 {
+		work = append(work, fmt.Sprintf("%d hashes", activity.HashCount))
+	}
+	return strings.Join(work, " | ")
+}
+
+func renderBenchmarkActivity(progress *hashcat.BenchmarkProgress) []string {
+	if progress == nil {
+		return []string{
+			formatLine("Benchmark", "initializing"),
+			formatLine("Hardware Metrics", "temperature/utilization unavailable in benchmark mode"),
+		}
+	}
+
+	lines := []string{}
+	if progress.HashName != "" || progress.HashMode != 0 {
+		lines = append(lines, formatLine("Current Mode", benchmarkModeLabel(progress.HashMode, progress.HashName)))
+	} else {
+		lines = append(lines, formatLine("Current Mode", "waiting for Hashcat"))
+	}
+	if progress.TotalModes > 0 {
+		lines = append(lines, formatLine("Mode Progress", fmt.Sprintf("%d/%d complete", progress.CompletedModes, progress.TotalModes)))
+	} else {
+		lines = append(lines, formatLine("Mode Progress", fmt.Sprintf("%d complete", progress.CompletedModes)))
+	}
+	if progress.Speed > 0 {
+		result := humanizeHashRate(progress.Speed)
+		if !progress.ModeComplete {
+			result += " (partial)"
+		}
+		lines = append(lines, formatLine("Current Result", result))
+	} else {
+		lines = append(lines, formatLine("Current Result", "measuring..."))
+	}
+
+	lastSpeed := progress.LastSpeed
+	lastMode := progress.LastHashMode
+	lastName := progress.LastHashName
+	lastDevices := progress.LastDeviceSpeeds
+	if lastSpeed > 0 && (lastMode != progress.HashMode || progress.Speed == 0) {
+		lines = append(lines, formatLine("Latest Result", fmt.Sprintf("%s @ %s", benchmarkModeLabel(lastMode, lastName), humanizeHashRate(lastSpeed))))
+	}
+	lines = append(lines, formatLine("Hardware Metrics", "temperature/utilization unavailable in benchmark mode"))
+	devices := progress.DeviceSpeeds
+	if len(devices) == 0 {
+		devices = lastDevices
+	}
+	deviceLimit := len(devices)
+	if deviceLimit > 4 {
+		deviceLimit = 4
+	}
+	for _, device := range devices[:deviceLimit] {
+		lines = append(lines, formatLine(fmt.Sprintf("Device #%d", device.Device), humanizeHashRate(device.Speed)))
+	}
+	if remaining := len(devices) - deviceLimit; remaining > 0 {
+		lines = append(lines, formatLine("Devices", fmt.Sprintf("%d more", remaining)))
+	}
+	return lines
+}
+
+func hasHardwareMetrics(devices []hashcat.DeviceStatus) bool {
+	for _, device := range devices {
+		if device.Temp >= 0 || device.Util >= 0 || device.FanSpeed >= 0 || device.CoreSpeed >= 0 || device.MemorySpeed >= 0 || device.BusLanes > 0 || device.Power >= 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func benchmarkModeLabel(mode int32, name string) string {
+	if name == "" {
+		return fmt.Sprintf("%s (%d)", hashTypeLabel(mode), mode)
+	}
+	return fmt.Sprintf("%s (%d)", name, mode)
+}
+
+func renderActiveDevice(device hashcat.DeviceStatus) []string {
+	name := emptyFallback(device.Name, emptyFallback(device.Type, "unknown"))
+	metrics := []string{humanizeHashRate(device.Speed)}
+	if device.Temp >= 0 {
+		metrics = append(metrics, fmt.Sprintf("%d°C", device.Temp))
+	}
+	if device.Util >= 0 {
+		metrics = append(metrics, fmt.Sprintf("%d%% util", device.Util))
+	}
+	if device.FanSpeed >= 0 {
+		metrics = append(metrics, fmt.Sprintf("%d%% fan", device.FanSpeed))
+	}
+	if device.Power >= 0 {
+		metrics = append(metrics, fmt.Sprintf("%.1f W", float64(device.Power)/1000))
+	}
+	lines := []string{formatLine(fmt.Sprintf("Device #%d", device.ID), fmt.Sprintf("%s | %s", truncateString(name, 32), strings.Join(metrics, " | ")))}
+
+	clocks := []string{}
+	if device.CoreSpeed >= 0 {
+		clocks = append(clocks, fmt.Sprintf("core %d MHz", device.CoreSpeed))
+	}
+	if device.MemorySpeed >= 0 {
+		clocks = append(clocks, fmt.Sprintf("memory %d MHz", device.MemorySpeed))
+	}
+	if device.BusLanes > 0 {
+		clocks = append(clocks, fmt.Sprintf("PCIe x%d", device.BusLanes))
+	}
+	if len(clocks) > 0 {
+		lines = append(lines, formatLine(fmt.Sprintf("Device #%d Clocks", device.ID), strings.Join(clocks, " | ")))
+	}
+	return lines
+}
+
+func statusETA(status *hashcat.Status, now time.Time) (time.Time, bool) {
+	if status == nil || status.EstimatedStop <= 1 || status.EstimatedStop > math.MaxInt64 {
+		return time.Time{}, false
+	}
+	eta := time.Unix(int64(status.EstimatedStop), 0)
+	return eta, eta.After(now)
+}
+
+func (m crackstationModel) renderBox(lines []string) string {
+	if maxLines := m.bodyContentHeight(); maxLines > 0 && len(lines) > maxLines {
+		omitted := len(lines) - maxLines + 1
+		if maxLines == 1 {
+			lines = []string{formatLine("...", fmt.Sprintf("%d more lines", omitted))}
+		} else {
+			lines = append(append([]string(nil), lines[:maxLines-1]...), formatLine("...", fmt.Sprintf("%d more lines", omitted)))
+		}
+	}
+	width := m.contentWidth()
+	bounded := make([]string, len(lines))
+	for index, line := range lines {
+		bounded[index] = ansi.Truncate(line, width, "…")
+	}
+	return boxStyle.Width(width).Render(strings.Join(bounded, "\n"))
+}
+
+func (m crackstationModel) bodyContentHeight() int {
+	if m.height <= 0 {
+		return 0
+	}
+	// Reserve the header, footer, body border, and the blank rows inserted by
+	// renderMainView. Lip Gloss keeps one additional terminal row for the body
+	// border at constrained heights.
+	available := m.height - 9
+	if available < 1 {
+		return 1
+	}
+	return available
+}
+
+func (m crackstationModel) terminalWidth() int {
 	if m.width <= 0 {
 		return 80
 	}
-	return m.width - 4
+	return m.width
+}
+
+func (m crackstationModel) contentWidth() int {
+	width := m.terminalWidth()
+	if width <= 4 {
+		return 1
+	}
+	return width - 4
 }
 
 func (m crackstationModel) isActive() bool {
@@ -828,6 +1157,41 @@ func hashTypeLabel(hashMode int32) string {
 	return fmt.Sprintf("Hash Mode %d", hashMode)
 }
 
+func attackModeLabel(mode clientpb.CrackAttackMode) string {
+	switch mode {
+	case clientpb.CrackAttackMode_STRAIGHT:
+		return "Straight"
+	case clientpb.CrackAttackMode_COMBINATION:
+		return "Combination"
+	case clientpb.CrackAttackMode_BRUTEFORCE:
+		return "Brute force"
+	case clientpb.CrackAttackMode_HYBRID_WORDLIST_MASK:
+		return "Hybrid wordlist + mask"
+	case clientpb.CrackAttackMode_HYBRID_MASK_WORDLIST:
+		return "Hybrid mask + wordlist"
+	case clientpb.CrackAttackMode_ASSOCIATION:
+		return "Association"
+	case clientpb.CrackAttackMode_NO_ATTACK:
+		return "No attack"
+	default:
+		return strings.ReplaceAll(mode.String(), "_", " ")
+	}
+}
+
+func humanizeCount(value uint64) string {
+	if value < 1000 {
+		return fmt.Sprintf("%d", value)
+	}
+	suffixes := []string{"k", "M", "G", "T", "P", "E"}
+	scaled := float64(value)
+	exp := 0
+	for scaled >= 1000 && exp < len(suffixes) {
+		scaled /= 1000
+		exp++
+	}
+	return fmt.Sprintf("%.2f%s", scaled, suffixes[exp-1])
+}
+
 func humanizeHashRate(rate uint64) string {
 	const unit = 1000
 	if rate < unit {
@@ -1044,8 +1408,5 @@ func humanizeDuration(d time.Duration) string {
 }
 
 func truncateString(value string, max int) string {
-	if len(value) <= max {
-		return value
-	}
-	return value[:max]
+	return ansi.Truncate(value, max, "…")
 }

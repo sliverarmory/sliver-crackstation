@@ -35,6 +35,7 @@ const (
 	crackTaskKindCrack
 	crackTaskKindKeyspace
 	crackTaskKindBenchmark
+	crackTaskKindQuery
 )
 
 type crackTaskState int32

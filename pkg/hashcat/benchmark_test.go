@@ -83,6 +83,130 @@ func TestParseBenchmarkResultMarksTruncatedPrefixIncomplete(t *testing.T) {
 	}
 }
 
+func TestBenchmarkContextStreamingReportsModeAndDeviceProgress(t *testing.T) {
+	h := testHashcatScript(t, `
+printf '%s\n' \
+  '  * Hash-Mode 1000 (NTLM)  ' \
+  'Speed.#2.........: 2.00 GH/s' \
+  'Speed.#1.........: 1.00 GH/s' \
+  'Speed.#*.........: 2.75 GH/s' \
+  '* Hash-Mode 22000 (WPA (PBKDF2)) [Iterations: 4095]' \
+  'Speed.#2.........: 100.00 kH/s' \
+  'Speed.#1.........: 900.00 kH/s'
+`)
+	writeTestHashcatModules(t, h, 1000, 22000)
+
+	var progress []BenchmarkProgress
+	benchmarks, err := h.BenchmarkContextStreaming(nil, &clientpb.CrackCommand{
+		Benchmark:    true,
+		BenchmarkAll: true,
+	}, func(update BenchmarkProgress) {
+		progress = append(progress, update)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantBenchmarks := map[int32]uint64{1000: 2_750_000_000, 22000: 1_000_000}
+	if !reflect.DeepEqual(benchmarks, wantBenchmarks) {
+		t.Fatalf("BenchmarkContextStreaming() = %v; want %v", benchmarks, wantBenchmarks)
+	}
+	if len(progress) != 8 {
+		t.Fatalf("progress callbacks = %#v; want two headers, five speed updates, and final completion", progress)
+	}
+	if first := progress[0]; first.HashMode != 1000 || first.HashName != "NTLM" || first.TotalModes != 2 || first.CompletedModes != 0 || first.Speed != 0 {
+		t.Fatalf("first progress = %#v", first)
+	}
+	wantFirstDevice := []BenchmarkDeviceSpeed{{Device: 2, Speed: 2_000_000_000}}
+	if got := progress[1]; got.CompletedModes != 0 || got.ModeComplete || got.LastSpeed != 0 || got.Speed != 2_000_000_000 || !reflect.DeepEqual(got.DeviceSpeeds, wantFirstDevice) {
+		t.Fatalf("first device progress = %#v; partial device rate must remain in-progress with immutable snapshot %v", got, wantFirstDevice)
+	}
+	wantDevices := []BenchmarkDeviceSpeed{
+		{Device: 1, Speed: 1_000_000_000},
+		{Device: 2, Speed: 2_000_000_000},
+	}
+	if aggregate := progress[3]; !aggregate.ModeComplete || aggregate.Speed != 2_750_000_000 || !reflect.DeepEqual(aggregate.DeviceSpeeds, wantDevices) {
+		t.Fatalf("aggregate progress = %#v; want aggregate with sorted devices %v", aggregate, wantDevices)
+	}
+	transition := progress[4]
+	if transition.HashMode != 22000 || transition.HashName != "WPA (PBKDF2)" || transition.ModeComplete || transition.Speed != 0 || len(transition.DeviceSpeeds) != 0 ||
+		transition.LastHashMode != 1000 || transition.LastHashName != "NTLM" || transition.LastSpeed != 2_750_000_000 || !reflect.DeepEqual(transition.LastDeviceSpeeds, wantDevices) {
+		t.Fatalf("mode transition progress = %#v", transition)
+	}
+	final := progress[len(progress)-1]
+	if final.CompletedModes != 2 || !final.ModeComplete || final.Speed != 1_000_000 || final.LastHashMode != 22000 || final.LastSpeed != 1_000_000 {
+		t.Fatalf("final progress = %#v", final)
+	}
+}
+
+func TestBenchmarkProgressIgnoresInvalidSpeedsAndSaturatesDeviceSum(t *testing.T) {
+	var progress []BenchmarkProgress
+	observer := newBenchmarkProgressObserver(3, func(update BenchmarkProgress) {
+		progress = append(progress, update)
+	})
+	for _, line := range []string{
+		"* Hash-Mode 22000 (WPA (PBKDF2)) [Iterations: 4095]",
+		"Speed.#1.........: nope H/s",
+		"Speed.#1.........: -1 H/s",
+		"Speed.#1.........: 0 H/s",
+		"Speed.#-1........: 1 H/s",
+		"Speed.#2.........: 10 EH/s",
+		"Speed.#1.........: 10 EH/s",
+	} {
+		observer.observeLine([]byte(line))
+	}
+	observer.finishCurrent()
+	if len(progress) != 4 {
+		t.Fatalf("progress callbacks = %#v; invalid and zero speeds must be ignored and completion emitted once", progress)
+	}
+	final := progress[len(progress)-1]
+	if final.HashName != "WPA (PBKDF2)" || final.Speed != ^uint64(0) || final.CompletedModes != 1 {
+		t.Fatalf("saturated progress = %#v", final)
+	}
+	wantDevices := []BenchmarkDeviceSpeed{
+		{Device: 1, Speed: 10_000_000_000_000_000_000},
+		{Device: 2, Speed: 10_000_000_000_000_000_000},
+	}
+	if !reflect.DeepEqual(final.DeviceSpeeds, wantDevices) {
+		t.Fatalf("device speeds = %v; want sorted %v", final.DeviceSpeeds, wantDevices)
+	}
+}
+
+func TestBenchmarkContextStreamingLeavesUnknownTotalWithoutExplicitMode(t *testing.T) {
+	h := testHashcatScript(t, `
+printf '%s\n' \
+  '* Hash-Mode 0 (MD5)' \
+  'Speed.#1.........: 10 H/s' \
+  '' \
+  '* Hash-Mode 1000 (NTLM)' \
+  'Speed.#1.........: 20 H/s'
+`)
+
+	var progress []BenchmarkProgress
+	_, err := h.BenchmarkContextStreaming(nil, &clientpb.CrackCommand{
+		Benchmark: true,
+		HashType:  clientpb.HashType_INVALID,
+	}, func(update BenchmarkProgress) {
+		progress = append(progress, update)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(progress) == 0 || progress[len(progress)-1].CompletedModes != 2 || progress[len(progress)-1].TotalModes != 0 {
+		t.Fatalf("progress = %#v; default benchmark mode count must remain unknown", progress)
+	}
+}
+
+func TestParseBenchmarkSpeedRejectsUint64Boundary(t *testing.T) {
+	for _, line := range []string{
+		"Speed.#1.........: 18446744073709551616 H/s",
+		"Speed.#1.........: 18.446744073709552 EH/s",
+	} {
+		if _, err := parseBenchmarkSpeed(line); err == nil || !strings.Contains(err.Error(), "overflows") {
+			t.Fatalf("parseBenchmarkSpeed(%q) error = %v; want overflow", line, err)
+		}
+	}
+}
+
 func TestBenchmarkAllRecoversInstalledModesAfterBridgeAbort(t *testing.T) {
 	h := testHashcatScript(t, `
 mode=all
@@ -113,12 +237,15 @@ esac
 `)
 	writeTestHashcatModules(t, h, 1000, 72000, 74000, 99999)
 
-	benchmarks, err := h.Benchmark(&clientpb.CrackCommand{
+	var progress []BenchmarkProgress
+	benchmarks, err := h.BenchmarkContextStreaming(nil, &clientpb.CrackCommand{
 		AttackMode:     clientpb.CrackAttackMode_NO_ATTACK,
 		HashType:       clientpb.HashType_INVALID,
 		Benchmark:      true,
 		BenchmarkAll:   true,
 		LogfileDisable: true,
+	}, func(update BenchmarkProgress) {
+		progress = append(progress, update)
 	})
 	if err != nil {
 		t.Fatalf("Benchmark() error = %v", err)
@@ -126,6 +253,9 @@ esac
 	want := map[int32]uint64{1000: 42, 74000: 74, 99999: 99}
 	if !reflect.DeepEqual(benchmarks, want) {
 		t.Fatalf("Benchmark() = %v; want %v", benchmarks, want)
+	}
+	if len(progress) == 0 || progress[len(progress)-1].CompletedModes != 3 || progress[len(progress)-1].LastHashMode != 99999 {
+		t.Fatalf("recovery progress = %#v; observer must span retries without double counting", progress)
 	}
 
 	invocations, err := os.ReadFile(filepath.Join(h.cwd, "invocations"))

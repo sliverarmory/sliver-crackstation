@@ -41,24 +41,24 @@ func TestReaderKnownFields(t *testing.T) {
 }
 
 func TestReaderUnknownFields(t *testing.T) {
-	raw := protowire.AppendTag(nil, 114, protowire.VarintType)
+	raw := protowire.AppendTag(nil, 500, protowire.VarintType)
 	raw = protowire.AppendVarint(raw, 1)
-	raw = protowire.AppendTag(raw, 116, protowire.VarintType)
+	raw = protowire.AppendTag(raw, 501, protowire.VarintType)
 	raw = protowire.AppendVarint(raw, 180)
-	raw = protowire.AppendTag(raw, 120, protowire.BytesType)
+	raw = protowire.AppendTag(raw, 502, protowire.BytesType)
 	raw = protowire.AppendString(raw, "/tmp/seek")
 	for _, value := range []string{"?d?d", "words.txt"} {
-		raw = protowire.AppendTag(raw, 143, protowire.BytesType)
+		raw = protowire.AppendTag(raw, 503, protowire.BytesType)
 		raw = protowire.AppendString(raw, value)
 	}
-	raw = protowire.AppendTag(raw, 148, protowire.VarintType)
+	raw = protowire.AppendTag(raw, 504, protowire.VarintType)
 	raw = protowire.AppendVarint(raw, 0)
 	packed := protowire.AppendVarint(nil, 2)
 	packed = protowire.AppendVarint(packed, 3)
-	raw = protowire.AppendTag(raw, 154, protowire.BytesType)
+	raw = protowire.AppendTag(raw, 505, protowire.BytesType)
 	raw = protowire.AppendBytes(raw, packed)
 	for _, value := range [][]byte{[]byte(":"), []byte("$1")} {
-		raw = protowire.AppendTag(raw, 166, protowire.BytesType)
+		raw = protowire.AppendTag(raw, 506, protowire.BytesType)
 		raw = protowire.AppendBytes(raw, value)
 	}
 
@@ -69,36 +69,36 @@ func TestReaderUnknownFields(t *testing.T) {
 		t.Fatalf("NewReader() error = %v", err)
 	}
 
-	pipelineStats, err := reader.Bool(114)
+	pipelineStats, err := reader.Bool(500)
 	if err != nil || !pipelineStats {
-		t.Fatalf("Bool(114) = %v, %v; want true, nil", pipelineStats, err)
+		t.Fatalf("Bool(500) = %v, %v; want true, nil", pipelineStats, err)
 	}
-	runtime, err := reader.Uint32(116)
+	runtime, err := reader.Uint32(501)
 	if err != nil || runtime != 180 {
-		t.Fatalf("Uint32(116) = %v, %v; want 180, nil", runtime, err)
+		t.Fatalf("Uint32(501) = %v, %v; want 180, nil", runtime, err)
 	}
-	seekDB, err := reader.String(120)
+	seekDB, err := reader.String(502)
 	if err != nil || seekDB != "/tmp/seek" {
-		t.Fatalf("String(120) = %q, %v", seekDB, err)
+		t.Fatalf("String(502) = %q, %v", seekDB, err)
 	}
-	inputs, err := reader.Strings(143)
+	inputs, err := reader.Strings(503)
 	if err != nil || !slices.Equal(inputs, []string{"?d?d", "words.txt"}) {
-		t.Fatalf("Strings(143) = %q, %v", inputs, err)
+		t.Fatalf("Strings(503) = %q, %v", inputs, err)
 	}
-	if !reader.Has(148) {
-		t.Fatal("Has(148) = false; want explicit zero to be present")
+	if !reader.Has(504) {
+		t.Fatal("Has(504) = false; want explicit zero to be present")
 	}
-	zero, err := reader.Uint32(148)
+	zero, err := reader.Uint32(504)
 	if err != nil || zero != 0 {
-		t.Fatalf("Uint32(148) = %d, %v; want 0, nil", zero, err)
+		t.Fatalf("Uint32(504) = %d, %v; want 0, nil", zero, err)
 	}
-	whitelist, err := reader.Uint32s(154)
+	whitelist, err := reader.Uint32s(505)
 	if err != nil || !slices.Equal(whitelist, []uint32{2, 3}) {
-		t.Fatalf("Uint32s(154) = %v, %v; want [2 3], nil", whitelist, err)
+		t.Fatalf("Uint32s(505) = %v, %v; want [2 3], nil", whitelist, err)
 	}
-	rules, err := reader.BytesList(166)
+	rules, err := reader.BytesList(506)
 	if err != nil || len(rules) != 2 || string(rules[0]) != ":" || string(rules[1]) != "$1" {
-		t.Fatalf("BytesList(166) = %q, %v; want [: $1], nil", rules, err)
+		t.Fatalf("BytesList(506) = %q, %v; want [: $1], nil", rules, err)
 	}
 }
 
@@ -111,15 +111,15 @@ func TestReaderRejectsMalformedUnknownField(t *testing.T) {
 }
 
 func TestReaderSkipsUnknownOccurrencesWithWrongWireType(t *testing.T) {
-	raw := protowire.AppendTag(nil, 148, protowire.VarintType)
+	raw := protowire.AppendTag(nil, 504, protowire.VarintType)
 	raw = protowire.AppendVarint(raw, 7)
-	raw = protowire.AppendTag(raw, 148, protowire.BytesType)
+	raw = protowire.AppendTag(raw, 504, protowire.BytesType)
 	raw = protowire.AppendString(raw, "wrong wire type")
-	raw = protowire.AppendTag(raw, 143, protowire.VarintType)
+	raw = protowire.AppendTag(raw, 503, protowire.VarintType)
 	raw = protowire.AppendVarint(raw, 9)
-	raw = protowire.AppendTag(raw, 143, protowire.BytesType)
+	raw = protowire.AppendTag(raw, 503, protowire.BytesType)
 	raw = protowire.AppendString(raw, "operand")
-	raw = protowire.AppendTag(raw, 167, protowire.VarintType)
+	raw = protowire.AppendTag(raw, 507, protowire.VarintType)
 	raw = protowire.AppendVarint(raw, 1)
 
 	message := &clientpb.CrackCommand{}
@@ -128,16 +128,16 @@ func TestReaderSkipsUnknownOccurrencesWithWrongWireType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewReader() error = %v", err)
 	}
-	value, err := reader.Uint32(148)
+	value, err := reader.Uint32(504)
 	if err != nil || value != 7 {
-		t.Fatalf("Uint32(148) = %d, %v; want 7, nil", value, err)
+		t.Fatalf("Uint32(504) = %d, %v; want 7, nil", value, err)
 	}
-	values, err := reader.Strings(143)
+	values, err := reader.Strings(503)
 	if err != nil || !slices.Equal(values, []string{"operand"}) {
-		t.Fatalf("Strings(143) = %q, %v; want [operand], nil", values, err)
+		t.Fatalf("Strings(503) = %q, %v; want [operand], nil", values, err)
 	}
-	if reader.HasBytes(167) {
-		t.Fatal("HasBytes(167) accepted a wrong-wire varint")
+	if reader.HasBytes(507) {
+		t.Fatal("HasBytes(507) accepted a wrong-wire varint")
 	}
 }
 
@@ -147,13 +147,13 @@ func TestUnknownFieldSettersReplaceAndPreserve(t *testing.T) {
 	preserved = protowire.AppendString(preserved, "preserve")
 	message.ProtoReflect().SetUnknown(preserved)
 
-	if err := SetBytes(message, 8, []byte("first")); err != nil {
+	if err := SetBytes(message, 500, []byte("first")); err != nil {
 		t.Fatalf("SetBytes(first) error = %v", err)
 	}
-	if err := SetBytes(message, 8, []byte("second")); err != nil {
+	if err := SetBytes(message, 500, []byte("second")); err != nil {
 		t.Fatalf("SetBytes(second) error = %v", err)
 	}
-	if err := SetInt32(message, 11, -1); err != nil {
+	if err := SetInt32(message, 501, -1); err != nil {
 		t.Fatalf("SetInt32() error = %v", err)
 	}
 
@@ -161,9 +161,9 @@ func TestUnknownFieldSettersReplaceAndPreserve(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewReader() error = %v", err)
 	}
-	stdout, err := reader.Bytes(8)
+	stdout, err := reader.Bytes(500)
 	if err != nil || string(stdout) != "second" {
-		t.Fatalf("Bytes(8) = %q, %v; want second, nil", stdout, err)
+		t.Fatalf("Bytes(500) = %q, %v; want second, nil", stdout, err)
 	}
 	preservedValue, err := reader.String(200)
 	if err != nil || preservedValue != "preserve" {
@@ -181,13 +181,13 @@ func TestUnknownFieldSettersReplaceAndPreserve(t *testing.T) {
 		if valueLen < 0 {
 			t.Fatalf("ConsumeFieldValue() = %d", valueLen)
 		}
-		if protoreflect.FieldNumber(number) == 8 {
+		if protoreflect.FieldNumber(number) == 500 {
 			count++
 		}
 		raw = raw[tagLen+valueLen:]
 	}
 	if count != 1 {
-		t.Fatalf("field 8 encoded %d times; want once", count)
+		t.Fatalf("field 500 encoded %d times; want once", count)
 	}
 }
 

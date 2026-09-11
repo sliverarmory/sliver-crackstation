@@ -8,6 +8,7 @@ import (
 
 	"github.com/bishopfox/sliver/protobuf/clientpb"
 	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestParseUserTaskArgsHashcatV7Options(t *testing.T) {
@@ -143,7 +144,7 @@ func TestParseUserTaskArgsCompleteHashcatV7Surface(t *testing.T) {
 	raw = appendUnknownString(raw, crackFieldBrainPasswordV7, "v7-secret")
 	raw = appendUnknownUint32(raw, crackFieldGenerateRulesFuncMinV7, 0)
 	raw = appendUnknownUint32(raw, crackFieldGenerateRulesFuncMaxV7, 0)
-	command.ProtoReflect().SetUnknown(raw)
+	mergeCrackCommandWireFields(t, command, raw)
 
 	h := &Hashcat{}
 	args, cleanup, err := h.parseUserTaskArgs(command)
@@ -209,7 +210,7 @@ func TestParseUserTaskArgsCompleteHashcatV7Surface(t *testing.T) {
 func TestParseUserTaskArgsPreservesEmptyBrainPassword(t *testing.T) {
 	t.Setenv("SLIVER_CRACKSTATION_ROOT_DIR", t.TempDir())
 	command := &clientpb.CrackCommand{BrainPassword: "legacy-secret"}
-	command.ProtoReflect().SetUnknown(appendUnknownString(nil, crackFieldBrainPasswordV7, ""))
+	mergeCrackCommandWireFields(t, command, appendUnknownString(nil, crackFieldBrainPasswordV7, ""))
 	args, _, err := (&Hashcat{}).parseUserTaskArgs(command)
 	if err != nil {
 		t.Fatal(err)
@@ -222,7 +223,7 @@ func TestParseUserTaskArgsPreservesEmptyBrainPassword(t *testing.T) {
 func TestParseUserTaskArgsIgnoresWrongWireBrainPassword(t *testing.T) {
 	t.Setenv("SLIVER_CRACKSTATION_ROOT_DIR", t.TempDir())
 	command := &clientpb.CrackCommand{BrainPassword: "legacy-secret"}
-	command.ProtoReflect().SetUnknown(appendUnknownUint32(nil, crackFieldBrainPasswordV7, 7))
+	mergeCrackCommandWireFields(t, command, appendUnknownUint32(nil, crackFieldBrainPasswordV7, 7))
 	args, _, err := (&Hashcat{}).parseUserTaskArgs(command)
 	if err != nil {
 		t.Fatal(err)
@@ -247,7 +248,7 @@ func TestParseUserTaskArgsMetaModesDoNotInheritDefaultHashOrAttackMode(t *testin
 	}
 
 	identifyCommand := &clientpb.CrackCommand{HashType: clientpb.HashType_MD5}
-	identifyCommand.ProtoReflect().SetUnknown(appendUnknownBool(nil, crackFieldIdentifyMode, true))
+	mergeCrackCommandWireFields(t, identifyCommand, appendUnknownBool(nil, crackFieldIdentifyMode, true))
 	identifyArgs, _, err := (&Hashcat{}).parseUserTaskArgs(identifyCommand)
 	if err != nil {
 		t.Fatal(err)
@@ -305,7 +306,7 @@ func TestParseUserTaskArgsModeSpecificHashcatV7Flags(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			test.command.ProtoReflect().SetUnknown(test.unknown)
+			mergeCrackCommandWireFields(t, test.command, test.unknown)
 			args, _, err := (&Hashcat{}).parseUserTaskArgs(test.command)
 			if err != nil {
 				t.Fatal(err)
@@ -333,7 +334,7 @@ func TestParseUserTaskArgsRestoreShowCommand(t *testing.T) {
 	t.Setenv("SLIVER_CRACKSTATION_ROOT_DIR", t.TempDir())
 
 	command := &clientpb.CrackCommand{}
-	command.ProtoReflect().SetUnknown(appendUnknownBool(nil, crackFieldRestoreShowCommand, true))
+	mergeCrackCommandWireFields(t, command, appendUnknownBool(nil, crackFieldRestoreShowCommand, true))
 
 	args, _, err := (&Hashcat{}).parseUserTaskArgs(command)
 	if err != nil {
@@ -348,7 +349,7 @@ func TestParseUserTaskArgsRejectsConflictingRestoreModes(t *testing.T) {
 	t.Setenv("SLIVER_CRACKSTATION_ROOT_DIR", t.TempDir())
 
 	command := &clientpb.CrackCommand{Restore: true}
-	command.ProtoReflect().SetUnknown(appendUnknownBool(nil, crackFieldRestoreShowCommand, true))
+	mergeCrackCommandWireFields(t, command, appendUnknownBool(nil, crackFieldRestoreShowCommand, true))
 
 	_, _, err := (&Hashcat{}).parseUserTaskArgs(command)
 	if err == nil {
@@ -413,7 +414,7 @@ func TestParseUserTaskArgsTerminatesOptionsBeforeOperands(t *testing.T) {
 	command := &clientpb.CrackCommand{}
 	raw := appendUnknownString(nil, crackFieldPositionalArguments, "--brain-password")
 	raw = appendUnknownString(raw, crackFieldPositionalArguments, "not-an-option-value")
-	command.ProtoReflect().SetUnknown(raw)
+	mergeCrackCommandWireFields(t, command, raw)
 
 	args, _, err := (&Hashcat{}).parseUserTaskArgs(command)
 	if err != nil {
@@ -429,10 +430,34 @@ func TestParseUserTaskArgsRejectsNULOperand(t *testing.T) {
 	t.Setenv("SLIVER_CRACKSTATION_ROOT_DIR", t.TempDir())
 
 	command := &clientpb.CrackCommand{}
-	command.ProtoReflect().SetUnknown(appendUnknownString(nil, crackFieldPositionalArguments, "bad\x00operand"))
+	mergeCrackCommandWireFields(t, command, appendUnknownString(nil, crackFieldPositionalArguments, "bad\x00operand"))
 	_, _, err := (&Hashcat{}).parseUserTaskArgs(command)
 	if err == nil || !strings.Contains(err.Error(), "NUL") {
 		t.Fatalf("parseUserTaskArgs error = %v; want NUL rejection", err)
+	}
+}
+
+func TestEffectiveHashModePrefersHashcatV7Field(t *testing.T) {
+	legacy := &clientpb.CrackCommand{HashType: clientpb.HashType_NTLM}
+	if mode, ok, err := EffectiveHashMode(legacy); err != nil || !ok || mode != 1000 {
+		t.Fatalf("EffectiveHashMode(legacy) = %d, %v, %v; want 1000, true, nil", mode, ok, err)
+	}
+
+	v7 := &clientpb.CrackCommand{HashType: clientpb.HashType_MD5}
+	mergeCrackCommandWireFields(t, v7, appendUnknownUint32(nil, crackFieldHashMode, 74000))
+	if mode, ok, err := EffectiveHashMode(v7); err != nil || !ok || mode != 74000 {
+		t.Fatalf("EffectiveHashMode(v7) = %d, %v, %v; want 74000, true, nil", mode, ok, err)
+	}
+
+	invalid := &clientpb.CrackCommand{HashType: clientpb.HashType_INVALID}
+	if mode, ok, err := EffectiveHashMode(invalid); err != nil || ok || mode != 0 {
+		t.Fatalf("EffectiveHashMode(invalid) = %d, %v, %v; want 0, false, nil", mode, ok, err)
+	}
+
+	outOfRange := &clientpb.CrackCommand{}
+	mergeCrackCommandWireFields(t, outOfRange, appendUnknownUint32(nil, crackFieldHashMode, ^uint32(0)))
+	if _, _, err := EffectiveHashMode(outOfRange); err == nil {
+		t.Fatal("EffectiveHashMode(out of range) error = nil")
 	}
 }
 
@@ -465,4 +490,11 @@ func appendUnknownPackedUint32(raw []byte, field protowire.Number, values []uint
 		packed = protowire.AppendVarint(packed, uint64(value))
 	}
 	return appendUnknownBytes(raw, field, packed)
+}
+
+func mergeCrackCommandWireFields(t *testing.T, command *clientpb.CrackCommand, raw []byte) {
+	t.Helper()
+	if err := (proto.UnmarshalOptions{Merge: true}).Unmarshal(raw, command); err != nil {
+		t.Fatalf("merge CrackCommand wire fields: %v", err)
+	}
 }

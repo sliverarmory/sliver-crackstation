@@ -1,17 +1,18 @@
 package hashcat
 
 import (
+	"fmt"
+	"math"
+
 	"github.com/bishopfox/sliver/protobuf/clientpb"
 	"github.com/sliverarmory/sliver-crackstation/pkg/protocompat"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // These numbers are defined by the canonical CrackCommand in Sliver's
-// protobuf/clientpb/client.proto. Crackstation intentionally reads them by
-// number until a Sliver release containing the Hashcat 7 schema is available.
-// Protobuf preserves fields unknown to the currently compiled descriptor, so
-// an updated server can use the new API without making this build depend on
-// unreleased Sliver source.
+// protobuf/clientpb/client.proto. Reading them by number keeps this compatibility
+// layer usable with both older descriptors, where the values remain unknown wire
+// fields, and the current generated descriptor, where they are native fields.
 const (
 	crackFieldOutfile                 protoreflect.FieldNumber = 28
 	crackFieldDebugFile               protoreflect.FieldNumber = 45
@@ -142,6 +143,30 @@ type crackCommandV7Fields struct {
 	brainPasswordV7         *string
 	generateRulesFuncMinV7  *uint32
 	generateRulesFuncMaxV7  *uint32
+}
+
+// EffectiveHashMode returns the Hashcat 7 hash-mode field when present and
+// otherwise falls back to the legacy HashType enum. This mirrors command-line
+// construction while allowing callers such as the local monitor to describe
+// newer modes that are not in the pinned protobuf enum.
+func EffectiveHashMode(command *clientpb.CrackCommand) (int32, bool, error) {
+	if command == nil {
+		return 0, false, nil
+	}
+	fields, err := readCrackCommandV7Fields(command)
+	if err != nil {
+		return 0, false, fmt.Errorf("decode Hashcat 7 command fields: %w", err)
+	}
+	if fields.hashMode != nil {
+		if *fields.hashMode > uint32(math.MaxInt32) {
+			return 0, false, fmt.Errorf("hashcat hash mode exceeds the supported range")
+		}
+		return int32(*fields.hashMode), true, nil
+	}
+	if command.GetHashType() == clientpb.HashType_INVALID {
+		return 0, false, nil
+	}
+	return int32(command.GetHashType()), true, nil
 }
 
 type compatFieldReader struct {
