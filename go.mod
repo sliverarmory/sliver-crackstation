@@ -8,7 +8,7 @@ require (
 	charm.land/lipgloss/v2 v2.0.6
 	github.com/bishopfox/sliver v1.7.8-0.20260904182742-c3e8a97f66e1
 	github.com/gofrs/uuid v4.4.0+incompatible
-	github.com/klauspost/compress v1.18.4
+	github.com/klauspost/compress v1.20.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	golang.org/x/sys v0.47.0
