@@ -6,7 +6,7 @@ require (
 	charm.land/bubbles/v2 v2.2.1
 	charm.land/bubbletea/v2 v2.0.8
 	charm.land/lipgloss/v2 v2.0.6
-	github.com/bishopfox/sliver v1.7.8-0.20260911234842-c43347886bd2
+	github.com/bishopfox/sliver v1.7.8-0.20260912173115-262851373d44
 	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/gofrs/uuid v4.4.0+incompatible
 	github.com/klauspost/compress v1.20.0
