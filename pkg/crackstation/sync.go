@@ -188,9 +188,13 @@ func (c *Crackstation) releaseSync() {
 }
 
 func deduplicateCrackFiles(files []*clientpb.CrackFile) []*clientpb.CrackFile {
+	ordered := append([]*clientpb.CrackFile(nil), files...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return crackFileMetadataLess(ordered[i], ordered[j])
+	})
 	seen := map[string]struct{}{}
 	unique := make([]*clientpb.CrackFile, 0, len(files))
-	for _, file := range files {
+	for _, file := range ordered {
 		if file == nil {
 			unique = append(unique, nil)
 			continue
@@ -203,6 +207,47 @@ func deduplicateCrackFiles(files []*clientpb.CrackFile) []*clientpb.CrackFile {
 		unique = append(unique, file)
 	}
 	return unique
+}
+
+func crackFileMetadataLess(left, right *clientpb.CrackFile) bool {
+	if left == nil {
+		return right != nil
+	}
+	if right == nil {
+		return false
+	}
+	if left.GetType() != right.GetType() {
+		return left.GetType() < right.GetType()
+	}
+	if left.GetSha2_256() != right.GetSha2_256() {
+		return left.GetSha2_256() < right.GetSha2_256()
+	}
+	leftEmpty := strings.TrimSpace(left.GetName()) == ""
+	rightEmpty := strings.TrimSpace(right.GetName()) == ""
+	if leftEmpty != rightEmpty {
+		return !leftEmpty
+	}
+	if len(left.GetName()) != len(right.GetName()) {
+		return len(left.GetName()) < len(right.GetName())
+	}
+	leftName := strings.ToLower(left.GetName())
+	rightName := strings.ToLower(right.GetName())
+	if leftName != rightName {
+		return leftName < rightName
+	}
+	if left.GetName() != right.GetName() {
+		return left.GetName() < right.GetName()
+	}
+	if left.GetID() != right.GetID() {
+		return left.GetID() < right.GetID()
+	}
+	if left.GetUncompressedSize() != right.GetUncompressedSize() {
+		return left.GetUncompressedSize() < right.GetUncompressedSize()
+	}
+	if left.GetCreatedAt() != right.GetCreatedAt() {
+		return left.GetCreatedAt() < right.GetCreatedAt()
+	}
+	return left.GetLastModified() < right.GetLastModified()
 }
 
 func validateCrackFiles(files []*clientpb.CrackFile) error {
@@ -590,12 +635,13 @@ func (c *Crackstation) recordServerInventory(server *SliverServer, files []*clie
 	for _, file := range files {
 		manifest[filepath.Join(c.dataDirForType(file.GetType()), file.GetSha2_256())] = struct{}{}
 	}
+	snapshot := newFileInventorySnapshot(server, files, time.Now())
 	c.inventoryLock.Lock()
 	defer c.inventoryLock.Unlock()
 	if c.inventories == nil {
-		c.inventories = make(map[*SliverServer]map[string]struct{})
+		c.inventories = make(map[*SliverServer]serverFileInventory)
 	}
-	c.inventories[server] = manifest
+	c.inventories[server] = serverFileInventory{retained: manifest, snapshot: snapshot}
 	keep := make(map[string]struct{})
 	configured := 0
 	complete := true
@@ -607,12 +653,12 @@ func (c *Crackstation) recordServerInventory(server *SliverServer, files []*clie
 				complete = false
 				return true
 			}
-			serverManifest, ok := c.inventories[configuredServer]
+			serverInventory, ok := c.inventories[configuredServer]
 			if !ok {
 				complete = false
 				return true
 			}
-			for path := range serverManifest {
+			for path := range serverInventory.retained {
 				keep[path] = struct{}{}
 			}
 			return true

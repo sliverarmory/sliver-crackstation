@@ -30,6 +30,8 @@ const (
 	viewHost
 	viewDevices
 	viewBenchmarks
+	viewFiles
+	viewCount
 
 	syncProgressLabelWidth = 12
 	maxSyncProgressFiles   = 6
@@ -106,6 +108,8 @@ type crackstationModel struct {
 	confirmQuit  bool
 	benchmarks   map[int32]uint64
 	benchErr     error
+	fileData     fileViewData
+	filePage     int
 	devicePage   int
 	benchPage    int
 	width        int
@@ -204,6 +208,7 @@ func newModel(crack *crackstation.Crackstation, statusSub chan *clientpb.Crackst
 	if crack != nil {
 		model.status = crack.Status()
 		model.activity = crack.Activity()
+		model.fileData = collectFileViewData(crack.FileInventories())
 	}
 	return model
 }
@@ -250,8 +255,14 @@ func (m crackstationModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.confirmQuit = false
 			return m, nil
 		case "tab":
-			m.view = (m.view + 1) % 4
+			m.view = (m.view + 1) % viewCount
 		case "left":
+			if m.view == viewFiles {
+				pages := m.filePageCount()
+				if pages > 0 {
+					m.filePage = (m.filePage - 1 + pages) % pages
+				}
+			}
 			if m.view == viewDevices {
 				pages := m.devicePageCount()
 				if pages > 0 {
@@ -265,6 +276,12 @@ func (m crackstationModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "right":
+			if m.view == viewFiles {
+				pages := m.filePageCount()
+				if pages > 0 {
+					m.filePage = (m.filePage + 1) % pages
+				}
+			}
 			if m.view == viewDevices {
 				pages := m.devicePageCount()
 				if pages > 0 {
@@ -281,6 +298,7 @@ func (m crackstationModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.filePage = m.clampFilePage(m.filePage)
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -290,6 +308,8 @@ func (m crackstationModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = (*clientpb.CrackstationStatus)(msg)
 		if m.crack != nil {
 			m.activity = m.crack.Activity()
+			m.fileData = collectFileViewData(m.crack.FileInventories())
+			m.filePage = m.clampFilePage(m.filePage)
 		}
 		if benchmarkActivityEnded(previousActivity, m.activity) && m.crack != nil {
 			benchmarks, err := m.crack.LoadBenchmarkResults()
@@ -379,7 +399,7 @@ func (m crackstationModel) renderHeader() string {
 
 func (m crackstationModel) footerText() string {
 	hint := ""
-	if m.view == viewDevices || m.view == viewBenchmarks {
+	if m.view == viewFiles || m.view == viewDevices || m.view == viewBenchmarks {
 		hint = "  \u2190/\u2192: page"
 	}
 	return fmt.Sprintf("q: quit  tab: next view  view: %s%s", m.viewName(), hint)
@@ -436,6 +456,7 @@ func (m crackstationModel) renderTabs() string {
 		{label: "Host", view: viewHost},
 		{label: "Devices", view: viewDevices},
 		{label: "Benchmarks", view: viewBenchmarks},
+		{label: "Files", view: viewFiles},
 	}
 
 	parts := make([]string, 0, len(tabs))
@@ -450,6 +471,9 @@ func (m crackstationModel) renderTabs() string {
 }
 
 func (m crackstationModel) renderBody() string {
+	if m.view == viewFiles {
+		return m.renderBox(m.renderFileLines())
+	}
 	if m.view == viewDevices {
 		lines := m.renderDeviceLines()
 		return m.renderBox(lines)
@@ -1000,6 +1024,8 @@ func (m crackstationModel) viewName() string {
 	switch m.view {
 	case viewSummary:
 		return "summary"
+	case viewFiles:
+		return "files"
 	case viewHost:
 		return "host"
 	case viewDevices:

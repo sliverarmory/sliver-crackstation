@@ -105,7 +105,7 @@ func NewCrackstation(name string, dataDir string, hashcatInstance *hashcat.Hashc
 		syncPending:         make(map[*SliverServer]syncRequestState),
 		syncRetries:         make(map[*SliverServer]uint),
 		syncRetryGeneration: make(map[*SliverServer]<-chan struct{}),
-		inventories:         make(map[*SliverServer]map[string]struct{}),
+		inventories:         make(map[*SliverServer]serverFileInventory),
 		syncRetryBaseDelay:  defaultSyncRetryBaseDelay,
 		syncRetryMaxDelay:   defaultSyncRetryMaxDelay,
 	}
@@ -142,8 +142,8 @@ type Crackstation struct {
 	syncRetryGeneration map[*SliverServer]<-chan struct{}
 	syncRetryBaseDelay  time.Duration
 	syncRetryMaxDelay   time.Duration
-	inventoryLock       sync.Mutex
-	inventories         map[*SliverServer]map[string]struct{}
+	inventoryLock       sync.RWMutex
+	inventories         map[*SliverServer]serverFileInventory
 	done                chan struct{}
 
 	hashcat *hashcat.Hashcat
