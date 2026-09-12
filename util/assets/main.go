@@ -14,14 +14,16 @@ import (
 )
 
 const (
-	defaultHashcatVersion = "7.1.2-armory.1"
-	hashcatReleaseBaseURL = "https://github.com/sliverarmory/hashcat/releases/download"
+	defaultHashcatVersion = "7.1.2-armory.2"
+	// defaultHashcatSourceCommit is recorded in each archive's build provenance.
+	defaultHashcatSourceCommit = "f108828b55f2ab514cbdc0eede253e2f17046382"
+	hashcatReleaseBaseURL      = "https://github.com/sliverarmory/hashcat/releases/download"
 )
 
 var pinnedHashcatChecksums = map[string]string{
-	"hashcat-darwin_arm64.zip":  "8f8676a7526c4f6fc46e02231b0b245125f9bddcda20bd86248e381d38a24273",
-	"hashcat-linux_amd64.zip":   "00f650995ff1c61bae4cbb0ac9a0afbb755484b555d5ecfe902c8a0614e17b12",
-	"hashcat-windows_amd64.zip": "f4cc5ac8d3934e5d06981b291762318c0af32fc59f8945359f5a9e172b38b649",
+	"hashcat-darwin_arm64.zip":  "b90e83dc25706e9acf0554c5bd8f6c5356f2987f8346a56f7ef538f5a530fc4f",
+	"hashcat-linux_amd64.zip":   "2b8e60ddec4243df786affdcd54b8776569d44fbeee4d3d9c093794ba1f9c235",
+	"hashcat-windows_amd64.zip": "494c1c72ab025e71bb747dbe720f2021c152959c261b61f648c4a6b33e4a5187",
 }
 
 type assetDownload struct {
@@ -35,15 +37,16 @@ func main() {
 	flag.Parse()
 
 	downloads := hashcatDownloads(*version)
-	checksums := pinnedHashcatChecksums
-	checksumsSource := "pinned checksums"
-	if *version != defaultHashcatVersion {
-		checksumsSource = fmt.Sprintf("%s/v%s/SHA256SUMS", hashcatReleaseBaseURL, *version)
-		var err error
-		checksums, err = fetchChecksums(checksumsSource)
-		if err != nil {
+	checksumsSource := fmt.Sprintf("%s/v%s/SHA256SUMS", hashcatReleaseBaseURL, *version)
+	checksums, err := fetchChecksums(checksumsSource)
+	if err != nil {
+		exitError(err)
+	}
+	if *version == defaultHashcatVersion {
+		if err := verifyPinnedChecksums(downloads, checksums); err != nil {
 			exitError(err)
 		}
+		checksums = pinnedHashcatChecksums
 	}
 
 	fmt.Println("-----------------------------------------------------------------")
@@ -59,6 +62,23 @@ func main() {
 			exitError(err)
 		}
 	}
+}
+
+func verifyPinnedChecksums(downloads []assetDownload, published map[string]string) error {
+	for _, download := range downloads {
+		pinned, ok := pinnedHashcatChecksums[download.name]
+		if !ok {
+			return fmt.Errorf("pinned checksum for %s not found", download.name)
+		}
+		releaseChecksum, ok := published[download.name]
+		if !ok {
+			return fmt.Errorf("checksum for %s not found in release manifest", download.name)
+		}
+		if pinned != releaseChecksum {
+			return fmt.Errorf("release checksum mismatch for %s: got %s, expected pinned %s", download.name, releaseChecksum, pinned)
+		}
+	}
+	return nil
 }
 
 func hashcatDownloads(version string) []assetDownload {

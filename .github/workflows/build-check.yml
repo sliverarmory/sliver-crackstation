@@ -66,3 +66,23 @@ jobs:
         run: |
           make assets
           make macos-arm64
+
+  test-windows-hashcat:
+    name: Test Embedded Windows Hashcat
+    runs-on: windows-2025
+    timeout-minutes: 20
+
+    steps:
+      - name: Check Out Code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Fetch and verify embedded Hashcat archives
+        run: go run -mod=vendor ./util/assets
+
+      - name: Test embedded Windows Hashcat
+        run: go test -mod=vendor ./pkg/hashcat -run '^TestEmbeddedWindowsHashcatPackage$' -count=1 -v
