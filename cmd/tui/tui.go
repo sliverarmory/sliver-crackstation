@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"charm.land/bubbles/v2/progress"
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -29,6 +30,10 @@ const (
 	viewHost
 	viewDevices
 	viewBenchmarks
+
+	syncProgressLabelWidth = 12
+	maxSyncProgressFiles   = 6
+	minSyncProgressWidth   = 6
 )
 
 var (
@@ -89,21 +94,22 @@ var (
 type statusMsg *clientpb.CrackstationStatus
 
 type crackstationModel struct {
-	crack       *crackstation.Crackstation
-	status      *clientpb.CrackstationStatus
-	activity    *crackstation.ActivitySnapshot
-	statusSub   chan *clientpb.CrackstationStatus
-	lastUpdate  time.Time
-	spinner     spinner.Model
-	view        viewMode
-	confirming  bool
-	confirmQuit bool
-	benchmarks  map[int32]uint64
-	benchErr    error
-	devicePage  int
-	benchPage   int
-	width       int
-	height      int
+	crack        *crackstation.Crackstation
+	status       *clientpb.CrackstationStatus
+	activity     *crackstation.ActivitySnapshot
+	statusSub    chan *clientpb.CrackstationStatus
+	lastUpdate   time.Time
+	spinner      spinner.Model
+	syncProgress progress.Model
+	view         viewMode
+	confirming   bool
+	confirmQuit  bool
+	benchmarks   map[int32]uint64
+	benchErr     error
+	devicePage   int
+	benchPage    int
+	width        int
+	height       int
 }
 
 func StartTUI(crack *crackstation.Crackstation) error {
@@ -186,19 +192,26 @@ func newModel(crack *crackstation.Crackstation, statusSub chan *clientpb.Crackst
 		benchmarks, benchErr = crack.LoadBenchmarkResults()
 	}
 	model := crackstationModel{
-		crack:      crack,
-		statusSub:  statusSub,
-		lastUpdate: time.Now(),
-		spinner:    spin,
-		view:       viewSummary,
-		benchmarks: benchmarks,
-		benchErr:   benchErr,
+		crack:        crack,
+		statusSub:    statusSub,
+		lastUpdate:   time.Now(),
+		spinner:      spin,
+		syncProgress: newSyncProgress(),
+		view:         viewSummary,
+		benchmarks:   benchmarks,
+		benchErr:     benchErr,
 	}
 	if crack != nil {
 		model.status = crack.Status()
 		model.activity = crack.Activity()
 	}
 	return model
+}
+
+func newSyncProgress() progress.Model {
+	bar := progress.New(progress.WithColors(lipgloss.Color("69")))
+	bar.PercentageStyle = valueStyle
+	return bar
 }
 
 func (m crackstationModel) Init() tea.Cmd {
@@ -455,7 +468,7 @@ func (m crackstationModel) renderBody() string {
 	}
 
 	var lines []string
-	if m.activity != nil {
+	if m.activity != nil || (m.status.GetIsSyncing() && m.status.GetSyncing() != nil) {
 		// Put live work first so the useful telemetry remains visible even in a
 		// short terminal. The static host summary is still available below and
 		// in the Host tab.
@@ -618,17 +631,28 @@ func (m crackstationModel) renderBenchmarkLines() []string {
 }
 
 func (m crackstationModel) renderDetailLines() []string {
-	lines := m.renderActivityLines(time.Now())
+	lines := m.renderSyncLines()
+	activityLines := m.renderActivityLines(time.Now())
+	if len(activityLines) > 0 {
+		if len(lines) > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, activityLines...)
+	}
+	return lines
+}
+
+func (m crackstationModel) renderSyncLines() []string {
 	if m.status == nil || !m.status.GetIsSyncing() || m.status.GetSyncing() == nil {
-		return lines
+		return nil
 	}
 
-	if len(lines) > 0 {
-		lines = append(lines, "")
-	}
 	progress := m.status.GetSyncing().GetProgress()
 	if len(progress) == 0 {
-		return append(lines, formatLine("Sync Progress", "No file progress reported"))
+		return []string{
+			titleStyle.Render("File Synchronization"),
+			formatLine("Sync Progress", "No file progress reported"),
+		}
 	}
 
 	keys := make([]string, 0, len(progress))
@@ -637,17 +661,45 @@ func (m crackstationModel) renderDetailLines() []string {
 	}
 	sort.Strings(keys)
 
-	lines = append(lines, titleStyle.Render("File Synchronization"))
-	lines = append(lines, formatLine("Sync Progress", fmt.Sprintf("%d files", len(keys))))
-	maxLines := 6
+	lines := []string{
+		titleStyle.Render(fmt.Sprintf(
+			"File Synchronization (%d files @ %s)",
+			len(keys),
+			humanizeRate(m.status.GetSyncing().GetSpeed()),
+		)),
+		m.renderSyncProgressLine("Overall", averageProgress(progress)),
+	}
 	for i, key := range keys {
-		if i >= maxLines {
-			lines = append(lines, formatLine("...", fmt.Sprintf("%d more", len(keys)-maxLines)))
+		if i >= maxSyncProgressFiles {
+			lines = append(lines, formatLine("...", fmt.Sprintf("%d more", len(keys)-maxSyncProgressFiles)))
 			break
 		}
-		lines = append(lines, formatLine(truncateString(key, 12), fmt.Sprintf("%.0f%%", progress[key]*100)))
+		lines = append(lines, m.renderSyncProgressLine(key, progress[key]))
 	}
 	return lines
+}
+
+func (m crackstationModel) renderSyncProgressLine(label string, value float32) string {
+	percent := normalizedProgress(value)
+	shortLabel := truncateString(label, syncProgressLabelWidth)
+	paddedLabel := fmt.Sprintf("%-*s", syncProgressLabelWidth+1, shortLabel+":")
+	prefix := labelStyle.Render(paddedLabel) + " "
+	barWidth := m.bodyLineWidth() - ansi.StringWidth(prefix)
+	if barWidth < minSyncProgressWidth {
+		percentage := fmt.Sprintf("%.0f%%", percent*100)
+		labelWidth := m.bodyLineWidth() - ansi.StringWidth(percentage) - 2
+		if labelWidth < 1 {
+			labelWidth = 1
+		}
+		return formatLine(truncateString(label, labelWidth), percentage)
+	}
+
+	bar := m.syncProgress
+	if bar.Width() == 0 {
+		bar = newSyncProgress()
+	}
+	bar.SetWidth(barWidth)
+	return prefix + bar.ViewAs(percent)
 }
 
 func (m crackstationModel) renderActivityLines(now time.Time) []string {
@@ -892,9 +944,10 @@ func (m crackstationModel) renderBox(lines []string) string {
 		}
 	}
 	width := m.contentWidth()
+	lineWidth := m.bodyLineWidth()
 	bounded := make([]string, len(lines))
 	for index, line := range lines {
-		bounded[index] = ansi.Truncate(line, width, "…")
+		bounded[index] = ansi.Truncate(line, lineWidth, "…")
 	}
 	return boxStyle.Width(width).Render(strings.Join(bounded, "\n"))
 }
@@ -926,6 +979,14 @@ func (m crackstationModel) contentWidth() int {
 		return 1
 	}
 	return width - 4
+}
+
+func (m crackstationModel) bodyLineWidth() int {
+	width := m.contentWidth() - boxStyle.GetHorizontalFrameSize()
+	if width < 1 {
+		return 1
+	}
+	return width
 }
 
 func (m crackstationModel) isActive() bool {
@@ -1132,11 +1193,19 @@ func averageProgress(progress map[string]float32) float32 {
 	if len(progress) == 0 {
 		return 0
 	}
-	var total float32
+	var total float64
 	for _, val := range progress {
-		total += val
+		total += normalizedProgress(val)
 	}
-	return total / float32(len(progress))
+	return float32(total / float64(len(progress)))
+}
+
+func normalizedProgress(value float32) float64 {
+	percent := float64(value)
+	if math.IsNaN(percent) || math.IsInf(percent, 0) {
+		return 0
+	}
+	return math.Max(0, math.Min(1, percent))
 }
 
 func formatLine(label, value string) string {
