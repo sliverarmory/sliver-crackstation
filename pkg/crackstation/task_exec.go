@@ -39,6 +39,10 @@ const (
 	crackCommandHashCopyField            protoreflect.FieldNumber = 140
 	crackCommandStatusTimerV7Field       protoreflect.FieldNumber = 160
 	crackCommandOutfileCheckTimerV7Field protoreflect.FieldNumber = 162
+	// crackCommandIgnoreLocalCacheField is a control-plane field used only by
+	// CrackCommand payloads attached to crack-benchmark events. It must never be
+	// forwarded to Hashcat.
+	crackCommandIgnoreLocalCacheField protoreflect.FieldNumber = 174
 )
 
 type recoveredCredential struct {
@@ -88,10 +92,33 @@ func (c *Crackstation) runBenchmarkRequest(server *SliverServer) {
 	if server != nil {
 		connectionDone = server.connectionDoneSnapshot()
 	}
-	c.runBenchmarkRequestForConnection(server, connectionDone)
+	c.runBenchmarkRequestForConnection(server, connectionDone, false)
 }
 
-func (c *Crackstation) runBenchmarkRequestForConnection(server *SliverServer, connectionDone <-chan struct{}) {
+func parseBenchmarkRequest(data []byte) (bool, error) {
+	if len(data) == 0 {
+		return false, nil
+	}
+	command := &clientpb.CrackCommand{}
+	if err := proto.Unmarshal(data, command); err != nil {
+		if len(data) == 16 {
+			// Older Sliver servers sent a raw 16-byte task UUID here.
+			return false, nil
+		}
+		return false, fmt.Errorf("decode benchmark request: %w", err)
+	}
+	fields, err := protocompat.NewReader(command)
+	if err != nil {
+		return false, fmt.Errorf("read benchmark request: %w", err)
+	}
+	ignoreLocalCache, err := fields.Bool(crackCommandIgnoreLocalCacheField)
+	if err != nil {
+		return false, fmt.Errorf("read benchmark cache policy: %w", err)
+	}
+	return ignoreLocalCache, nil
+}
+
+func (c *Crackstation) runBenchmarkRequestForConnection(server *SliverServer, connectionDone <-chan struct{}, ignoreLocalCache bool) {
 	taskContext, cancelTask, connectionLost := taskContextForConnection(connectionDone, c.done)
 	defer cancelTask()
 	if taskConnectionLost(connectionDone, c.done, connectionLost, cancelTask) {
@@ -105,34 +132,45 @@ func (c *Crackstation) runBenchmarkRequestForConnection(server *SliverServer, co
 	c.beginActivity(ActivitySnapshot{Kind: ActivityBenchmarking, Phase: ActivityPhasePreparing, JobID: "benchmark"})
 	defer c.endActivity()
 
-	// Server-requested benchmarks are always fresh. A cached result is useful
-	// for explicit --force-benchmark startup, but not for recalibrating leases.
 	var results map[int32]uint64
 	var err error
-	for attempt := 1; attempt <= benchmarkMaxAttempts; attempt++ {
-		c.setActivityAttempt(uint32(attempt))
-		c.setActivityPhase(ActivityPhaseBenchmarking)
-		err = c.benchmarkContext(taskContext)
+	if !ignoreLocalCache {
+		results, err = c.LoadBenchmarkResults()
 		if err == nil {
-			results, err = c.LoadBenchmarkResults()
-		}
-		if err == nil {
-			break
-		}
-		if taskConnectionLost(connectionDone, c.done, connectionLost, cancelTask) {
-			return
-		}
-		slog.Warn("Requested benchmark attempt failed", "attempt", attempt, "err", err)
-		if attempt < benchmarkMaxAttempts {
-			c.setActivityPhase(ActivityPhaseRetrying)
-			if !waitBenchmarkRetryContext(taskContext, attempt) {
-				return
-			}
+			slog.Info("Using cached benchmark results for server request", "modes", len(results))
 		}
 	}
-	if err != nil {
-		slog.Error("Requested benchmark failed after retries", "err", err)
-		return
+	if ignoreLocalCache || err != nil {
+		if ignoreLocalCache {
+			slog.Info("Server requested a fresh benchmark; ignoring local cache")
+		} else {
+			slog.Info("No usable cached benchmark results; running benchmark", "err", err)
+		}
+		for attempt := 1; attempt <= benchmarkMaxAttempts; attempt++ {
+			c.setActivityAttempt(uint32(attempt))
+			c.setActivityPhase(ActivityPhaseBenchmarking)
+			err = c.benchmarkContext(taskContext)
+			if err == nil {
+				results, err = c.LoadBenchmarkResults()
+			}
+			if err == nil {
+				break
+			}
+			if taskConnectionLost(connectionDone, c.done, connectionLost, cancelTask) {
+				return
+			}
+			slog.Warn("Requested benchmark attempt failed", "attempt", attempt, "err", err)
+			if attempt < benchmarkMaxAttempts {
+				c.setActivityPhase(ActivityPhaseRetrying)
+				if !waitBenchmarkRetryContext(taskContext, attempt) {
+					return
+				}
+			}
+		}
+		if err != nil {
+			slog.Error("Requested benchmark failed after retries", "err", err)
+			return
+		}
 	}
 	c.setActivityPhase(ActivityPhaseUploading)
 	for attempt := 1; attempt <= benchmarkMaxAttempts; attempt++ {

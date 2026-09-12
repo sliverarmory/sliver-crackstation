@@ -20,6 +20,7 @@ import (
 	"github.com/sliverarmory/sliver-crackstation/pkg/protocompat"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestHandleEventBenchmarkUploadsResults(t *testing.T) {
@@ -155,6 +156,162 @@ func newTestHashcatWithScript(t *testing.T, script string) *hashcat.Hashcat {
 		reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().SetString(value)
 	}
 	return h
+}
+
+func benchmarkRequestData(t *testing.T, ignoreLocalCache bool) []byte {
+	t.Helper()
+	command := &clientpb.CrackCommand{}
+	if err := protocompat.SetBool(command, crackCommandIgnoreLocalCacheField, ignoreLocalCache); err != nil {
+		t.Fatal(err)
+	}
+	data, err := proto.Marshal(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func TestParseBenchmarkRequestAcceptsSixteenByteProtobuf(t *testing.T) {
+	command := &clientpb.CrackCommand{Session: "1234567890"}
+	if err := protocompat.SetBool(command, crackCommandIgnoreLocalCacheField, true); err != nil {
+		t.Fatal(err)
+	}
+	data, err := proto.Marshal(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) != 16 {
+		t.Fatalf("test payload length = %d; want 16", len(data))
+	}
+	ignoreLocalCache, err := parseBenchmarkRequest(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ignoreLocalCache {
+		t.Fatal("valid 16-byte protobuf was mistaken for a legacy task UUID")
+	}
+}
+
+func TestRequestedBenchmarkUsesLocalCacheByDefault(t *testing.T) {
+	forceData, err := proto.Marshal(&clientpb.CrackCommand{Force: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	benchmarkOptionData, err := proto.Marshal(&clientpb.CrackCommand{BenchmarkMin: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name string
+		data []byte
+	}{
+		{name: "empty request"},
+		{name: "hashcat force", data: forceData},
+		{name: "unrecognized benchmark option", data: benchmarkOptionData},
+		{name: "malformed request", data: []byte{0x80}},
+		{name: "legacy task UUID", data: []byte("0123456789abcdef")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "benchmark-ran")
+			h := newScriptHashcat(t, `
+: > '`+marker+`'
+printf '%s\n' '* Hash-Mode 1000 (NTLM)' 'Speed.#1.........: 88 H/s'
+`)
+			var uploaded *clientpb.CrackBenchmark
+			mock := &mockSliverRPC{CrackstationBenchmarkFunc: func(_ context.Context, benchmark *clientpb.CrackBenchmark) (*commonpb.Empty, error) {
+				uploaded = benchmark
+				return &commonpb.Empty{}, nil
+			}}
+			station, err := NewCrackstation("worker", t.TempDir(), h)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := station.saveBenchmarkResults(map[int32]uint64{1000: 41}); err != nil {
+				t.Fatal(err)
+			}
+			server := &SliverServer{Crackstation: station, rpc: newBufConnClient(t, mock)}
+
+			station.handleEvent(server, &clientpb.Event{EventType: crackBenchmarkEvent, Data: test.data})
+
+			if uploaded == nil || uploaded.GetBenchmarks()[1000] != 41 {
+				t.Fatalf("uploaded benchmark = %#v; want cached rate 41", uploaded)
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatalf("Hashcat benchmark unexpectedly ran; marker error = %v", err)
+			}
+		})
+	}
+}
+
+func TestRequestedBenchmarkIgnoreLocalCacheRunsFreshWithoutHashcatForce(t *testing.T) {
+	argsPath := filepath.Join(t.TempDir(), "hashcat-args")
+	h := newScriptHashcat(t, `
+printf '%s\n' "$@" > '`+argsPath+`'
+printf '%s\n' '* Hash-Mode 1000 (NTLM)' 'Speed.#1.........: 88 H/s'
+`)
+	var uploaded *clientpb.CrackBenchmark
+	mock := &mockSliverRPC{CrackstationBenchmarkFunc: func(_ context.Context, benchmark *clientpb.CrackBenchmark) (*commonpb.Empty, error) {
+		uploaded = benchmark
+		return &commonpb.Empty{}, nil
+	}}
+	station, err := NewCrackstation("worker", t.TempDir(), h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := station.saveBenchmarkResults(map[int32]uint64{1000: 41}); err != nil {
+		t.Fatal(err)
+	}
+	server := &SliverServer{Crackstation: station, rpc: newBufConnClient(t, mock)}
+
+	station.handleEvent(server, &clientpb.Event{
+		EventType: crackBenchmarkEvent,
+		Data:      benchmarkRequestData(t, true),
+	})
+
+	if uploaded == nil || uploaded.GetBenchmarks()[1000] != 88 {
+		t.Fatalf("uploaded benchmark = %#v; want fresh rate 88", uploaded)
+	}
+	cached, err := station.LoadBenchmarkResults()
+	if err != nil || cached[1000] != 88 {
+		t.Fatalf("cached benchmark = %v, %v; want fresh rate 88", cached, err)
+	}
+	data, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Fields(string(data))
+	for _, arg := range args {
+		if arg == "--force" {
+			t.Fatalf("IgnoreLocalCache leaked into Hashcat argv: %q", args)
+		}
+	}
+}
+
+func TestRequestedBenchmarkReplacesInvalidLocalCache(t *testing.T) {
+	h := newScriptHashcat(t, `printf '%s\n' '* Hash-Mode 1000 (NTLM)' 'Speed.#1.........: 88 H/s'`)
+	var uploaded *clientpb.CrackBenchmark
+	mock := &mockSliverRPC{CrackstationBenchmarkFunc: func(_ context.Context, benchmark *clientpb.CrackBenchmark) (*commonpb.Empty, error) {
+		uploaded = benchmark
+		return &commonpb.Empty{}, nil
+	}}
+	station, err := NewCrackstation("worker", t.TempDir(), h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := station.saveBenchmarkResults(map[int32]uint64{1000: 0}); err != nil {
+		t.Fatal(err)
+	}
+	server := &SliverServer{Crackstation: station, rpc: newBufConnClient(t, mock)}
+
+	station.handleEvent(server, &clientpb.Event{EventType: crackBenchmarkEvent})
+
+	if uploaded == nil || uploaded.GetBenchmarks()[1000] != 88 {
+		t.Fatalf("uploaded benchmark = %#v; want fresh rate 88", uploaded)
+	}
+	cached, err := station.LoadBenchmarkResults()
+	if err != nil || cached[1000] != 88 {
+		t.Fatalf("cached benchmark = %v, %v; want replacement rate 88", cached, err)
+	}
 }
 
 func TestBenchmarkRunsAllHashModesWithoutExplicitModes(t *testing.T) {
@@ -293,9 +450,8 @@ func TestRequestedBenchmarkRetriesAgainOnReconnectEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := &SliverServer{Crackstation: station, rpc: newBufConnClient(t, mock)}
-	// The first registration event exhausts its bounded upload retries. Since
-	// no benchmark was acknowledged, the server sends another event when this
-	// station reconnects.
+	// The first registration event runs the benchmark and exhausts its bounded
+	// upload retries. The reconnect event reuses that result for another upload.
 	station.runBenchmarkRequest(server)
 	station.runBenchmarkRequest(server)
 	if uploads.Load() != int32(benchmarkMaxAttempts+1) {
@@ -305,8 +461,8 @@ func TestRequestedBenchmarkRetriesAgainOnReconnectEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(runs), "run\n") != 2 {
-		t.Fatalf("fresh benchmark runs = %q; want one per server request", runs)
+	if strings.Count(string(runs), "run\n") != 1 {
+		t.Fatalf("fresh benchmark runs = %q; reconnect should reuse the first result", runs)
 	}
 }
 

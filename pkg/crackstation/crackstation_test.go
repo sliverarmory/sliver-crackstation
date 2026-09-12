@@ -86,6 +86,27 @@ func TestLoadBenchmarkResultsRejectsEmptyCache(t *testing.T) {
 	}
 }
 
+func TestLoadBenchmarkResultsRejectsInvalidEntries(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		data string
+	}{
+		{name: "negative hash mode", data: `{"-1":1}`},
+		{name: "invalid hash mode sentinel", data: `{"9999":1}`},
+		{name: "zero rate", data: `{"1000":0}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			station := &Crackstation{dataDir: t.TempDir()}
+			if err := os.WriteFile(filepath.Join(station.dataDir, "benchmark.json"), []byte(test.data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := station.LoadBenchmarkResults(); err == nil {
+				t.Fatalf("LoadBenchmarkResults accepted %s", test.data)
+			}
+		})
+	}
+}
+
 func (f *fakeRPC) CrackstationBenchmark(ctx context.Context, in *clientpb.CrackBenchmark, opts ...grpc.CallOption) (*commonpb.Empty, error) {
 	f.received = in
 	return &commonpb.Empty{}, nil

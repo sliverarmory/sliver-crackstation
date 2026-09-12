@@ -691,6 +691,11 @@ func (c *Crackstation) LoadBenchmarkResults() (map[int32]uint64, error) {
 	if len(results) == 0 {
 		return nil, errors.New("benchmark.json contains no benchmark results")
 	}
+	for hashMode, speed := range results {
+		if hashMode < 0 || hashMode == int32(clientpb.HashType_INVALID) || speed == 0 {
+			return nil, fmt.Errorf("benchmark.json contains invalid result for hash mode %d", hashMode)
+		}
+	}
 	return results, nil
 }
 
@@ -708,7 +713,11 @@ func (c *Crackstation) handleEventForConnection(server *SliverServer, event *cli
 	case crackEvent:
 		c.runCrackTaskForConnection(server, event.Data, connectionDone)
 	case crackBenchmarkEvent:
-		c.runBenchmarkRequestForConnection(server, connectionDone)
+		ignoreLocalCache, err := parseBenchmarkRequest(event.Data)
+		if err != nil {
+			slog.Warn("Invalid benchmark request data; using local cache when available", "err", err)
+		}
+		c.runBenchmarkRequestForConnection(server, connectionDone, ignoreLocalCache)
 	case crackKeyspaceEvent:
 		c.runKeyspaceTaskForConnection(server, event.Data, connectionDone)
 	case crackQueryEvent:
