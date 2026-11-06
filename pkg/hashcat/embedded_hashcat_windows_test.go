@@ -29,8 +29,8 @@ func TestEmbeddedWindowsHashcatPackage(t *testing.T) {
 		filepath.FromSlash("OpenCL/shared.cl"),
 		filepath.FromSlash("OpenCL/inc_common.cl"),
 		filepath.FromSlash("OpenCL/inc_common.h"),
-		filepath.FromSlash("OpenCL/m00000_a3-pure.cl"),
-		filepath.FromSlash("OpenCL/m00400-pure.cl"),
+		filepath.FromSlash("OpenCL/m00000_a3-optimized.cl"),
+		filepath.FromSlash("OpenCL/m00400-optimized.cl"),
 	} {
 		if _, err := os.Stat(filepath.Join(hashcatDir, name)); err != nil {
 			t.Errorf("required Windows package file %s: %v", name, err)
@@ -41,7 +41,7 @@ func TestEmbeddedWindowsHashcatPackage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := len(modules), 595; got != want {
+	if got, want := len(modules), 728; got != want {
 		t.Fatalf("extracted module DLLs = %d, want %d", got, want)
 	}
 
@@ -70,7 +70,7 @@ func TestEmbeddedWindowsHashcatPackage(t *testing.T) {
 	if err != nil || versionResult.ExitCode != 0 {
 		t.Fatalf("run embedded Hashcat version probe: exit=%d err=%v context=%v stderr=%q", versionResult.ExitCode, err, versionContextErr, versionResult.Stderr)
 	}
-	if got, want := strings.TrimSpace(string(versionResult.Stdout)), "v7.1.2-armory.2"; got != want {
+	if got, want := strings.TrimSpace(string(versionResult.Stdout)), "v8.0.0-armory.2"; got != want {
 		t.Fatalf("embedded Hashcat version = %q, want %q", got, want)
 	}
 

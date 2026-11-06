@@ -149,10 +149,27 @@ func TestCrackstationCrackTaskE2E(t *testing.T) {
 	}()
 
 	var finalUpdate *clientpb.CrackTask
+	var recovered []recoveredCredential
 	deadline := time.After(90 * time.Second)
 	for {
 		select {
 		case update := <-updateCh:
+			// Recovered credentials arrive in batches before the terminal update.
+			fields, err := protocompat.NewReader(update)
+			if err != nil {
+				t.Fatalf("failed to decode task update: %v", err)
+			}
+			recoveredJSON, err := fields.Bytes(crackTaskRecoveredJSONField)
+			if err != nil {
+				t.Fatalf("failed to decode recovered credentials: %v", err)
+			}
+			if len(recoveredJSON) != 0 {
+				var batch []recoveredCredential
+				if err := json.Unmarshal(recoveredJSON, &batch); err != nil {
+					t.Fatalf("failed to unmarshal recovered credentials %q: %v", recoveredJSON, err)
+				}
+				recovered = append(recovered, batch...)
+			}
 			if update.CompletedAt != 0 {
 				finalUpdate = update
 				goto done
@@ -180,14 +197,6 @@ done:
 	}
 	if exitCode != 0 {
 		t.Fatalf("hashcat exit code = %d; want 0", exitCode)
-	}
-	recoveredJSON, err := resultFields.Bytes(crackTaskRecoveredJSONField)
-	if err != nil {
-		t.Fatalf("failed to decode recovered credentials: %v", err)
-	}
-	var recovered []recoveredCredential
-	if err := json.Unmarshal(recoveredJSON, &recovered); err != nil {
-		t.Fatalf("failed to unmarshal recovered credentials %q: %v", recoveredJSON, err)
 	}
 	if len(recovered) != 1 || recovered[0].Hash != hashInput || string(recovered[0].Plaintext) != plaintext {
 		t.Fatalf("recovered credentials = %#v; want exact salted hash %q and plaintext", recovered, hashInput)
