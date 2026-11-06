@@ -79,13 +79,13 @@ func TestPinnedWindowsHashcatArchiveIsComplete(t *testing.T) {
 			openCLSourceCount++
 		}
 	}
-	if got, want := len(reader.File), 2861; got != want {
+	if got, want := len(reader.File), 2659; got != want {
 		t.Errorf("Windows archive entries = %d, want %d", got, want)
 	}
-	if got, want := moduleCount, 595; got != want {
+	if got, want := moduleCount, 728; got != want {
 		t.Errorf("Windows module DLLs = %d, want %d", got, want)
 	}
-	if got, want := openCLSourceCount, 1838; got != want {
+	if got, want := openCLSourceCount, 1452; got != want {
 		t.Errorf("Windows OpenCL source files = %d, want %d", got, want)
 	}
 	for _, name := range []string{
@@ -99,8 +99,8 @@ func TestPinnedWindowsHashcatArchiveIsComplete(t *testing.T) {
 		"OpenCL/shared.cl",
 		"OpenCL/inc_common.cl",
 		"OpenCL/inc_common.h",
-		"OpenCL/m00000_a3-pure.cl",
-		"OpenCL/m00400-pure.cl",
+		"OpenCL/m00000_a3-optimized.cl",
+		"OpenCL/m00400-optimized.cl",
 	} {
 		if _, ok := entries[name]; !ok {
 			t.Errorf("Windows archive is missing %s", name)

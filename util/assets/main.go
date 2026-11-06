@@ -14,16 +14,16 @@ import (
 )
 
 const (
-	defaultHashcatVersion = "7.1.2-armory.2"
+	defaultHashcatVersion = "8.0.0-armory.2"
 	// defaultHashcatSourceCommit is recorded in each archive's build provenance.
-	defaultHashcatSourceCommit = "f108828b55f2ab514cbdc0eede253e2f17046382"
+	defaultHashcatSourceCommit = "d745d3074dd296fdc1e91c9e48dee8a317d3c2d8"
 	hashcatReleaseBaseURL      = "https://github.com/sliverarmory/hashcat/releases/download"
 )
 
 var pinnedHashcatChecksums = map[string]string{
-	"hashcat-darwin_arm64.zip":  "b90e83dc25706e9acf0554c5bd8f6c5356f2987f8346a56f7ef538f5a530fc4f",
-	"hashcat-linux_amd64.zip":   "2b8e60ddec4243df786affdcd54b8776569d44fbeee4d3d9c093794ba1f9c235",
-	"hashcat-windows_amd64.zip": "494c1c72ab025e71bb747dbe720f2021c152959c261b61f648c4a6b33e4a5187",
+	"hashcat-darwin_arm64.zip":  "5aac57923cd92952b7b6d9b58bd18493647b01a3af4e60e8c46a1998e21ea98e",
+	"hashcat-linux_amd64.zip":   "75c13262a37d65c3e02732805f24f28de548fd2bc9e241aaa9d0d4aa4b6f9e12",
+	"hashcat-windows_amd64.zip": "7fdd7e098fe3e88661413348b54a3881174c1da7626f94e541456e7c9811ad72",
 }
 
 type assetDownload struct {
